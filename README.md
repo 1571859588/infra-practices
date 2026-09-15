@@ -6,9 +6,31 @@
 
 本文档列出 `ncu`、`nsys`、`c++`、`nvcc`、CUDA 在本机的**实际可用位置**、对应的 conda / uv 环境，以及验证过的运行方法。
 
-> 📁 动手练习见 [`vector_mul2/`](vector_mul2/README.md) —— 用最简单的 `y = x * 2`
-> 对比 PyTorch / Triton / CUDA 三种写法，并走一遍完整的 nsys / ncu / compute-sanitizer
-> 分析流程（含实测数据，ncu 部分通过 Docker 绕过了权限限制）。
+---
+
+## 仓库结构
+
+```
+practices/
+├── README.md              ← 本文件：环境速查（工具在哪、怎么跑、权限怎么解决）
+├── 综合练习/               ← 一个算子从写到 profile 的完整流程
+│   └── vector_mul2/          y = x*2，PyTorch / Triton / CUDA 三种写法对比
+│                             + nsys + ncu + compute-sanitizer 全流程实测
+└── triton/                ← 纯 Triton 练习，只练编程模型本身
+    ├── 01_vector_add.py      program_id / arange / mask
+    ├── 02_fused_softmax.py   规约 + 算子融合（4.3× 提速，最有说服力的一个）
+    └── 03_matmul.py          2D 分块 / tl.dot / Tensor Core / 分块调优
+```
+
+| 想干什么 | 去哪 |
+|---|---|
+| 查 `nvcc`/`ncu`/`nsys`/`c++` 在哪、怎么跑 | 本文件 |
+| 解决 `ncu` 的 `ERR_NVGPUCTRPERM` | 本文件 [§6](#6-ncunsight-compute) |
+| 学 profiler 怎么用、报告怎么读 | [`综合练习/vector_mul2/`](综合练习/vector_mul2/README.md) |
+| 对比 PyTorch / Triton / CUDA 三种写法 | [`综合练习/vector_mul2/`](综合练习/vector_mul2/README.md) §2 |
+| 练 Triton 本身（规约 / 融合 / 分块） | [`triton/`](triton/README.md) |
+
+两个练习目录都是**实测数据 + 踩坑清单 + 留白笔记**的结构，可以直接照着复现。
 
 ---
 
@@ -321,8 +343,8 @@ CapEff:	00000000a82425fb        # 非 0，含 CAP_SYS_ADMIN
 实测容器内该环境正常：torch 2.9.0+cu128、triton 3.5.0、`torch.cuda.is_available() = True`。
 
 > 📁 完整可跑的脚本见
-> [`vector_mul2/profile/run_ncu_docker.sh`](vector_mul2/profile/run_ncu_docker.sh)，
-> 实测数据和逐项解读见 [`vector_mul2/README.md` §5](vector_mul2/README.md#5-ncu-分析用-docker-绕过权限限制-)。
+> [`综合练习/vector_mul2/profile/run_ncu_docker.sh`](综合练习/vector_mul2/profile/run_ncu_docker.sh)，
+> 实测数据和逐项解读见 [`综合练习/vector_mul2/README.md` §5](综合练习/vector_mul2/README.md#5-ncu-分析用-docker-绕过权限限制-)。
 
 ### 6.3 其他方案（不如 Docker 方便，记录备查）
 
@@ -338,7 +360,7 @@ CapEff:	00000000a82425fb        # 非 0，含 CAP_SYS_ADMIN
    sudo -E /usr/local/cuda/bin/ncu --set full -o prof ./vecadd
    ```
 
-3. **不用 ncu**：先用 `nsys` 定位热点 kernel，用 `cuobjdump -sass` 看访存指令宽度，用 `nvcc -Xptxas=-v` 看寄存器/spill，用 `compute-sanitizer` 查正确性 —— 这些都不需要性能计数器权限，能回答相当多的问题（见 `vector_mul2/README.md` §7）。
+3. **不用 ncu**：先用 `nsys` 定位热点 kernel，用 `cuobjdump -sass` 看访存指令宽度，用 `nvcc -Xptxas=-v` 看寄存器/spill，用 `compute-sanitizer` 查正确性 —— 这些都不需要性能计数器权限，能回答相当多的问题（见 `综合练习/vector_mul2/README.md` §7）。
 
 ### 6.4 常用命令
 

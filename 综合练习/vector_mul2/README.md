@@ -3,7 +3,7 @@
 用最简单的 `y = x * 2` 把三种 GPU 编程方案从"写法差异"一路跑到"profiler 里能看到什么"。
 所有代码和数据都在本机（8×A100-40GB）实测跑通，日期 2026-09-15。
 
-> 上级目录的 [`../README.md`](../README.md) 记录了本机 `nvcc / ncu / nsys / c++` 的完整环境信息，
+> 上级目录的 [`../../README.md`](../../README.md) 记录了本机 `nvcc / ncu / nsys / c++` 的完整环境信息，
 > 本文只讲这个例子怎么跑、怎么分析。
 
 ---
@@ -26,7 +26,7 @@
 ## 0. 快速开始
 
 ```bash
-cd /mnt/gfs/nyt1/infra/practices/vector_mul2
+cd /mnt/gfs/nyt1/infra/practices/综合练习/vector_mul2
 
 # 一键全跑（benchmark 部分，约 2 分钟）
 bash run_all.sh
@@ -634,7 +634,7 @@ GUI 里对应的 section：
 
 ```bash
 # 在你自己的机器上执行
-BASE=/mnt/gfs/nyt1/infra/practices/vector_mul2/reports
+BASE=/mnt/gfs/nyt1/infra/practices/综合练习/vector_mul2/reports
 scp <user>@<server>:$BASE/all.nsys-rep .        # Python 侧三方对比时间线
 scp <user>@<server>:$BASE/cuda_only.nsys-rep .  # 纯 CUDA，含 memcpy
 scp <user>@<server>:$BASE/in_docker.nsys-rep .  # 容器内采集，额外带 CPU 采样
