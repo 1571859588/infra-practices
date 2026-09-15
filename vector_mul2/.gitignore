@@ -1,0 +1,12 @@
+# 构建产物
+libmul2.so
+cuda_mul2
+*.o
+
+# profile 产物（.nsys-rep 可以保留，.sqlite 是中间文件，几秒就能重新生成）
+reports/*.sqlite
+*.ncu-rep
+/tmp/nsys-report-*
+
+__pycache__/
+*.pyc
