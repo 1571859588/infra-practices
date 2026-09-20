@@ -16,11 +16,22 @@ practices/
 ├── 综合练习/               ← 一个算子从写到 profile 的完整流程
 │   └── vector_mul2/          y = x*2，PyTorch / Triton / CUDA 三种写法对比
 │                             + nsys + ncu + compute-sanitizer 全流程实测
-└── triton/                ← 纯 Triton 练习，只练编程模型本身
-    ├── 01_vector_add.py      program_id / arange / mask
-    ├── 02_fused_softmax.py   规约 + 算子融合（4.3× 提速，最有说服力的一个）
-    └── 03_matmul.py          2D 分块 / tl.dot / Tensor Core / 分块调优
+├── triton/                ← 纯 Triton 练习，只练编程模型本身
+│   ├── 01_vector_add/        program_id / arange / mask
+│   ├── 02_fused_softmax/     规约 + 算子融合（4.3× 提速，最有说服力的一个）
+│   ├── 03_matmul/            2D 分块 / tl.dot / Tensor Core / 分块调优
+│   ├── common.py             共用计时 / 校验 / 带宽换算
+│   └── run_all.sh            一键全跑
+└── cuda/                  ← 纯 CUDA C++ 练习，和 triton/ 一一对应
+    ├── 01_vector_add/        合并访存 → float4 → grid-stride（84.8% 峰值带宽）
+    ├── 02_reduction/         divergence → bank conflict → shuffle（5.58x，CUB 的 96.9%）
+    ├── 03_matmul/            shared 分块 → 寄存器分块 → float4（6.7x，cuBLAS 的 88.5%）
+    ├── common.mk / common.cuh
+    └── README.md
 ```
+
+`triton/` 和 `cuda/` 里每个练习都是一个**目录**：`v0` 朴素实现 → 逐步优化 →
+官方库基线，每一步的收益都实测过，目录内的 `README.md` 记录效果、原理和使用方法。
 
 | 想干什么 | 去哪 |
 |---|---|
@@ -29,8 +40,18 @@ practices/
 | 学 profiler 怎么用、报告怎么读 | [`综合练习/vector_mul2/`](综合练习/vector_mul2/README.md) |
 | 对比 PyTorch / Triton / CUDA 三种写法 | [`综合练习/vector_mul2/`](综合练习/vector_mul2/README.md) §2 |
 | 练 Triton 本身（规约 / 融合 / 分块） | [`triton/`](triton/README.md) |
+| 练 CUDA C++（shared memory / bank conflict / 寄存器分块 / roofline） | [`cuda/`](cuda/README.md) |
 
-两个练习目录都是**实测数据 + 踩坑清单 + 留白笔记**的结构，可以直接照着复现。
+三个练习目录都是**实测数据 + 踩坑清单 + 留白笔记**的结构，可以直接照着复现。
+
+> `triton/` 和 `cuda/` 解的是同一批问题，**对照着看最能体会分工**：
+> 编译器替你做了 shared memory 分配、bank conflict swizzle、寄存器分块和向量化；
+> grid 开多大、分块尺寸怎么选、什么 shape 该换 kernel，还是得自己想。
+> 各练习 README 末尾都有一节专门的对照表。
+>
+> ⚠️ 两边的绝对数字不能直接比 —— `triton/03_matmul` 是 fp16 + Tensor Core
+> （峰值 312 TFLOP/s），`cuda/03_matmul` 是纯 fp32 CUDA core（19.5 TFLOP/s）。
+> 看"占峰值"和"占官方库"才可比。
 
 ---
 

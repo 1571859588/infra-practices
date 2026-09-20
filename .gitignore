@@ -1,0 +1,23 @@
+# CUDA / C++ 编译产物（make clean 也会删，这里兜底防止误提交）
+*.o
+*.cubin
+*.ptx
+*.fatbin
+*.sass
+
+# 各练习 Makefile 生成的可执行文件
+cuda/*/bench
+
+# profiler 报告，动辄几十 MB，不进仓库
+*.nsys-rep
+*.ncu-rep
+*.sqlite
+*.qdrep
+
+# Python
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# Triton JIT 缓存（万一 TRITON_CACHE_DIR 被指到仓库里）
+.triton/

@@ -23,18 +23,24 @@
 
 ## 0. 快速开始
 
+每个练习是一个**目录**：`v*.py` 是各个变体（`v0` 朴素 → 逐步优化），
+`bench.py` 把它们串起来对比，`README.md` 记录效果、原理和结论，
+`_shared.py` 放该练习共用的测试用例和报告函数。
+
 ```bash
 cd /mnt/gfs/nyt1/infra/practices/triton
 
-# 一键跑完三个练习（约 3 分钟）
-bash run_all.sh
+# 一键跑完三个练习
+bash run_all.sh                 # 完整（含参数扫描）
+bash run_all.sh --quick         # 跳过扫描，只跑正确性 + 变体对比
 
-# 或单独跑
-export CUDA_VISIBLE_DEVICES=3       # 先挑一张空闲卡
+# 或单独跑某个练习的全部变体
+export CUDA_VISIBLE_DEVICES=7   # 先挑一张空闲卡
 PY=/mnt/public/nyt1/docqa/restored_envs/cpp/bin/python
-$PY 01_vector_add.py
-$PY 02_fused_softmax.py
-$PY 03_matmul.py
+cd 01_vector_add && $PY bench.py          # 或 bench.py --quick
+
+# 或只跑单个变体（每个 v*.py 自带正确性 + 单点性能）
+cd 01_vector_add && $PY v0_naive.py
 ```
 
 **环境**：conda env `cpp`（`/mnt/public/nyt1/docqa/restored_envs/cpp`），
@@ -45,25 +51,41 @@ $PY 03_matmul.py
 
 ```bash
 nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv
-export CUDA_VISIBLE_DEVICES=3       # 选 memory.used 最小的
+export CUDA_VISIBLE_DEVICES=7       # 选 memory.used 最小的
 ```
+
+`nvidia-smi` 在某些 shell 里跑不起来（缺 loader，报 `No such file or directory`），
+用 NVML 查更可靠 —— 命令见 [`../cuda/README.md` §3.3](../cuda/README.md)。
+**卡被别人占着的话绝对数字全废**（实测慢 2.1~2.3x），但优化链的**比值**基本不变。
 
 ---
 
 ## 1. 练习列表
 
-难度递增，每个文件都可独立运行，末尾都有「[练习] 试试看」的自测题。
+难度递增，每个变体都可独立运行，末尾都有「[练习] 试试看」的自测题。
 
-| 文件 | 主题 | 新学到的东西 | 类型 |
+| 目录 | 主题 | 新学到的东西 | 类型 |
 |---|---|---|---|
-| `01_vector_add.py` | 向量加法 | `program_id` / `arange` / `mask` / grid lambda | memory-bound |
-| `02_fused_softmax.py` | 融合 Softmax | `tl.max`/`tl.sum` 规约、`other=`、`num_warps`、**算子融合** | memory-bound |
-| `03_matmul.py` | 分块矩阵乘 | 2D 分块、K 循环、寄存器累加器、`tl.dot`（Tensor Core）、group-major | **compute-bound** |
+| [`01_vector_add/`](01_vector_add/README.md) | 向量加法 | `program_id` / `arange` / `mask` / grid lambda | memory-bound |
+| [`02_fused_softmax/`](02_fused_softmax/README.md) | 融合 Softmax | `tl.max`/`tl.sum` 规约、`other=`、`num_warps`、**算子融合** | memory-bound |
+| [`03_matmul/`](03_matmul/README.md) | 分块矩阵乘 | 2D 分块、K 循环、寄存器累加器、`tl.dot`（Tensor Core）、group-major | **compute-bound** |
 | `common.py` | — | 共用的 CUDA Event 计时 / 校验 / 带宽算力换算 | — |
 | `run_all.sh` | — | 一键全跑 | — |
 
+各目录里的变体：
+
+| | `v0` | `v1` | `v2` | `v3` |
+|---|---|---|---|---|
+| **01_vector_add** | 朴素（连续分段） | **反面教材**：跨步访存 | 循环展开 | autotune |
+| **02_fused_softmax** | torch 手工拼（未融合） | 融合版（一 program 一行） | persistent | online（分块规约） |
+| **03_matmul** | 朴素分块 | 调优分块 + group-major | autotune | 融合 epilogue |
+
 **推荐顺序**：01 → 02 → 03。01 建立基本手感，02 是 Triton **最有说服力**的
 用例（融合带来 4.3× 提速），03 才开始碰真正的性能调优。
+
+> **CUDA 对照版在 [`../cuda/`](../cuda/README.md)**，同样的三个问题用
+> CUDA C++ 再做一遍。每个练习的 README 末尾都有一节 "和 CUDA/Triton
+> 版的对照"，讲清楚哪些活是编译器干的、哪些还得自己想。
 
 ---
 
@@ -130,6 +152,11 @@ my_kernel[grid](x, out, n, BLOCK_SIZE=1024)
 
 环境：A100-SXM4-40GB（sm_80），HBM2e 峰值 **1555 GB/s**，
 fp16 Tensor Core 密集峰值 **312 TFLOP/s**。
+
+> 下面是**跨练习**的横向结论。每个练习自己的四个变体怎么一步步优化上来、
+> 每一步收益多少，在各自目录的 README 里：
+> [01](01_vector_add/README.md) / [02](02_fused_softmax/README.md) /
+> [03](03_matmul/README.md)。
 
 ### 3.1 练习 01：memory-bound 的天花板
 
@@ -294,7 +321,7 @@ print(c.asm.keys())                    # ttir / ttgir / llir / ptx / cubin
 ### 4.2 `TRITON_INTERPRET=1`：用 Python 调试 kernel
 
 ```bash
-TRITON_INTERPRET=1 python 01_vector_add.py
+TRITON_INTERPRET=1 python 01_vector_add/v0_naive.py
 ```
 
 在解释器模式下跑 kernel，**可以在 `@triton.jit` 函数里加 `print()` 和断点**，
@@ -320,7 +347,7 @@ TRITON_INTERPRET=1 python 01_vector_add.py
 ```bash
 # nsys：看时间线、确认 kernel 名字和 launch 开销
 /usr/local/cuda/bin/nsys profile -t cuda,nvtx -o rep --force-overwrite true \
-    $PY 02_fused_softmax.py
+    $PY 02_fused_softmax/v1_fused.py
 /usr/local/cuda/bin/nsys stats --report cuda_gpu_kern_sum rep.nsys-rep
 
 # ncu：看硬件计数器。本机宿主机上会报 ERR_NVGPUCTRPERM，要走 Docker
@@ -335,7 +362,7 @@ TRITON_INTERPRET=1 python 01_vector_add.py
 ```bash
 ncu --metrics gpu__time_duration.sum,dram__throughput.avg.pct_of_peak_sustained_elapsed,\
 sm__throughput.avg.pct_of_peak_sustained_elapsed,launch__registers_per_thread \
-    -k 'regex:softmax_kernel' --launch-count 1 python 02_fused_softmax.py
+    -k 'regex:softmax_kernel' --launch-count 1 python 02_fused_softmax/v1_fused.py
 ```
 ```
   softmax_kernel (4, 1, 1)x(128, 1, 1), CC 8.0
@@ -356,7 +383,7 @@ matmul 值得看的额外指标（已验证指标名有效）：
 ```bash
 ncu --metrics sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_active,\
 gpu__time_duration.sum,sm__throughput.avg.pct_of_peak_sustained_elapsed \
-    -k 'regex:matmul_kernel' --launch-skip 3 --launch-count 1 python 03_matmul.py
+    -k 'regex:matmul_kernel' --launch-skip 3 --launch-count 1 python 03_matmul/v1_tiled.py
 ```
 ```
   matmul_kernel (32, 1, 1)x(256, 1, 1), CC 8.0
@@ -369,6 +396,12 @@ gpu__time_duration.sum,sm__throughput.avg.pct_of_peak_sustained_elapsed \
 才有意义：说明 SM 大部分时间不是在算，而是在等数据 / 做地址计算 ——
 matmul kernel 的优化方向就是把 Tensor Core 喂得更满（调分块、调 `num_stages`
 让 software pipelining 更深）。
+
+> ⚠️ 上面两段输出是在**拆目录之前**的单文件脚本上抓的，
+> `--launch-skip/--launch-count` 的序号对现在的 `v*.py` **不一定还对得上**
+> （每个变体自己的正确性用例数量不同）。这恰好又印证了上一条：
+> **序号要自己数，别抄。** 先用 `--print-summary per-kernel` 或 nsys
+> 看一眼一共 launch 了几次、哪次是你要的。
 
 其他有用的：
 
@@ -396,7 +429,7 @@ smsp__inst_executed_op_global_ld.sum                # global load 指令数
 | 10 | **fp16 matmul 要求完全相等** | 校验必然 FAIL | `atol` 随 K 放大（误差 ~ `sqrt(K)·eps`） |
 | 11 | **`n_regs` 当成稳定接口用** | `AttributeError` 或 `None` | 只有 kernel 上设备后才有值，用 `getattr` 兜 |
 | 12 | **只看一次测量** | GPU 有 DVFS 频率波动 | `common.bench()` 取 5 组中位数 |
-| 13 | **在别人用的卡上跑** | 数据全废，还影响同事 | 先 `nvidia-smi` 挑 `memory.used` 最小的 |
+| 13 | **在别人用的卡上跑** | 绝对数字全废（实测慢 2.1~2.3x），还影响同事 | 先挑空闲卡，见 §0；比值还能用，绝对值不能记 |
 | 14 | **只读文件系统里跑 triton** | JIT 写缓存失败 | 设 `TRITON_CACHE_DIR=/tmp/triton_cache` |
 | 15 | **照搬别人的调优参数** | 可能完全无效（见 §3.4 的 GROUP_M） | 在自己的卡和自己的规模上实测 |
 | 16 | **以为重写 torch 已有算子能变快** | 白干（见 §3.2 的 `torch.softmax`） | 挑 torch **没有**的融合组合下手 |
@@ -405,22 +438,28 @@ smsp__inst_executed_op_global_ld.sum                # global load 指令数
 
 ## 6. 后续练习方向
 
-按「学到的东西 / 投入时间」排序：
+拆成目录之后，原来列在这里的三项已经作为变体做掉了：
 
-- [ ] **04：融合 epilogue** —— `relu(A@B + bias)`，对比「triton 一个 kernel」
-      vs「torch 三个 kernel」。这是 §3.3 说的「Triton matmul 的真正意义」
-- [ ] **05：LayerNorm（含反向）** —— 前向是规约练习，**反向要处理跨 program 的
+- [x] **融合 epilogue** → [`03_matmul/v3_fused_relu.py`](03_matmul/README.md)
+      —— `relu(A@B + bias)`，对比「triton 一个 kernel」vs「torch 三个 kernel」。
+      这就是 §3.3 说的「Triton matmul 的真正意义」
+- [x] **online softmax** → [`02_fused_softmax/v3_online.py`](02_fused_softmax/README.md)
+      —— 解决 §3.2 里「一行装不进寄存器」的问题
+- [x] **`@triton.autotune` 系统化调优** → `01_vector_add/v3_autotune.py`
+      和 `03_matmul/v2_autotune.py`，配 `TRITON_PRINT_AUTOTUNING=1` 看它选了什么
+
+剩下的，按「学到的东西 / 投入时间」排序：
+
+- [ ] **04：LayerNorm（含反向）** —— 前向是规约练习，**反向要处理跨 program 的
       梯度累加**，会用到 `tl.atomic_add` 和锁，难度陡增
-- [ ] **06：online softmax** —— 解决 §3.2 里「一行装不进寄存器」的问题，
-      FlashAttention 的前置知识
-- [ ] **07：FlashAttention 前向** —— 上面几个的综合，Triton 最有代表性的应用
-- [ ] **08：dropout + 随机数** —— `tl.rand`，理解 seed/offset 的用法
-- [ ] **09：量化 matmul** —— int8/fp8，epilogue 里做 dequant
-- [ ] **10：用 `@triton.autotune` 系统化调优** —— 把 §3.3 的手动扫描自动化，
-      并用 `TRITON_PRINT_AUTOTUNING=1` 看它选了什么
+- [ ] **05：FlashAttention 前向** —— online softmax + 分块 matmul 的综合，
+      Triton 最有代表性的应用
+- [ ] **06：dropout + 随机数** —— `tl.rand`，理解 seed/offset 的用法
+- [ ] **07：量化 matmul** —— int8/fp8，epilogue 里做 dequant
 
 配合 [`../综合练习/vector_mul2/`](../综合练习/vector_mul2/README.md) 的
-profiler 流程，可以给上面每一个练习都做一遍 nsys + ncu 分析。
+profiler 流程，可以给上面每一个练习都做一遍 nsys + ncu 分析；
+想把同一个问题用 CUDA C++ 再写一遍，去 [`../cuda/`](../cuda/README.md)。
 
 ---
 
