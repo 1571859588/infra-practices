@@ -181,8 +181,12 @@ Triton 自动做了 128-bit 向量化，PTX 里能直接看到（脚本会打印
 ```
 
 `.v4.b32` = 一条指令读 4 个 32-bit，等价于手写 CUDA 的 `float4`。
-**这是 Triton 能追平 torch 的关键** —— 在 `../综合练习/vector_mul2/` 里
-可以看到，没做向量化的朴素 CUDA 版反而是最慢的。
+
+> ⚠️ **但别把追平 torch 归功于向量化。** 后来做了一个隔离实验（固定合并访存模式，
+> 只切换向量化开关）：**向量化单独值 0%**（1346.6 vs 1342.1 GB/s）。
+> 在已经打满带宽的 kernel 上，少发指令没有地方可省 —— 真正决定成败的是
+> **合并访存**。详见 [`01_vector_add/README.md` §3.2](01_vector_add/README.md)
+> 和 [`01_vector_add/v0_naive.md` §2.7](01_vector_add/v0_naive.md)。
 
 ### 3.2 练习 02：融合才是 Triton 的价值 ⭐
 
@@ -419,8 +423,8 @@ smsp__inst_executed_op_global_ld.sum                # global load 指令数
 |---|---|---|---|
 | 1 | **不 warmup** | 首次 JIT 几百毫秒，测出来全是编译时间 | `common.bench()` 里有 25 次 warmup |
 | 2 | **不同步就计时** | launch 是异步的，只测到几微秒的 launch 开销 | 用 `torch.cuda.Event` + `synchronize()` |
-| 3 | **`BLOCK_SIZE` 不是 2 的幂** | 编译报错 | 用 `triton.next_power_of_2(n)` |
-| 4 | **忘了 `mask=`** | 静默越界读写，结果可能还"看着对" | 一律写 mask；用 `TRITON_INTERPRET=1` 或 compute-sanitizer 验 |
+| 3 | **`BLOCK_SIZE` 不是 2 的幂** | 编译报错 `arange's range must be a power of 2` | 用 `triton.next_power_of_2(n)`。约束是 2 的幂，**不是 32 的倍数** —— `96`/`192` 也过不了 |
+| 4 | **忘了 `mask=`** | 静默越界读写，结果可能还"看着对" | 一律写 mask。**查越界要用 `compute-sanitizer` + `PYTORCH_NO_CUDA_MEMORY_CACHING=1`** —— 不加这个环境变量会报 0 errors（torch 缓存分配器挡住了），实测见 [`01_vector_add/v0_naive.md` §1](01_vector_add/v0_naive.md)。`TRITON_INTERPRET=1` 只适合查逻辑错，查越界会崩在 host 堆上且无定位信息 |
 | 5 | **`other=` 选错** | 静默算错（求 max 时用 `other=0`，全负数的行就错） | 按 §2.4 的表选 |
 | 6 | **混淆 `BLOCK_SIZE` 和 `num_warps`** | 以为改了并行度其实没改 | 见 §2.3：一个是数据量，一个是线程数 |
 | 7 | **规约时 `axis` 写错** | 结果 shape 不对或规约错方向 | 1D 数据用 `axis=0`；2D 想按行规约是 `axis=1` |
@@ -470,7 +474,8 @@ profiler 流程，可以给上面每一个练习都做一遍 nsys + ncu 分析�
 ### 复现记录
 
 - [ ] `bash run_all.sh` 跑通，三个练习的数字和 §3 对得上吗？
-- [ ] 练习 01 第 1 题：去掉 mask 用 n=1000 跑，compute-sanitizer 报什么？
+- [x] 练习 01 的三道题 → [`01_vector_add/v0_naive.md`](01_vector_add/v0_naive.md)
+      （去掉 mask 后 compute-sanitizer 默认报 **0 errors**，原因和正确姿势都在里面）
 - [ ] 练习 02 第 1 题：去掉 `- tl.max(...)`，观察 nan 怎么出现
 - [ ] 练习 02 第 2 题：`other=-inf` 改成 `other=0`，哪种输入会算错？
 - [ ] 练习 03 第 1 题：accumulator 改 fp16，误差变多少？
