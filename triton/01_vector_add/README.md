@@ -19,6 +19,7 @@
 | `bench.py` | 全变体对比 + 参数扫描 + PTX 反汇编 | — | — |
 | `_shared.py` | 共用的用例 / 计时口径 / sys.path 处理 | — | — |
 | [`v0_naive.md`](v0_naive.md) | **`v0` 三道练习题的完整解析**（实测 + 可复现步骤） | — | — |
+| [`v0_naive_memcheck.md`](v0_naive_memcheck.md) | 延伸篇：逐字段读懂 memcheck 日志，从 layout / SASS 推出每个数字 | — | — |
 
 基线：`torch.add` = 151.0 us / 1333.7 GB/s (85.8%)。
 A100-SXM4-40GB，HBM2e 峰值 1555 GB/s。
@@ -206,7 +207,7 @@ matmul 那种动辄几十个候选的，第一次调用能到几十秒
 | 不 warmup 就测 autotune | 测到的是 tuning 时间（几百 ms） | `_shared.bench()` 里有 25 次 warmup |
 | `BLOCK_SIZE` 非 2 的幂 | 编译报错 `arange's range must be a power of 2` | `triton.next_power_of_2()`。注意约束是**2 的幂**，不是 32 的倍数 —— `96`/`192` 一样过不了 |
 | 忘了 `mask=` | 静默越界，`n=1000` 时读到别人的显存；**`out` 自己还是全对的，自测全 PASS** | 一律写 mask |
-| 忘了 `mask=` 后拿 `compute-sanitizer` 验 | **报 0 errors**，以为没事 | torch 的缓存分配器把越界挡在同一段 `cudaMalloc` 里了；必须加 `PYTORCH_NO_CUDA_MEMORY_CACHING=1`，见 [`v0_naive.md` §1](v0_naive.md) |
+| 忘了 `mask=` 后拿 `compute-sanitizer` 验 | **报 0 errors**，以为没事 | torch 的缓存分配器把越界挡在同一段 `cudaMalloc` 里了；必须加 `PYTORCH_NO_CUDA_MEMORY_CACHING=1`，见 [`v0_naive.md` §1](v0_naive.md)。越界若整段落进相邻分配，关了缓存照样 0 errors，还要加 `--padding 8192`，见 [`v0_naive_memcheck.md` §7](v0_naive_memcheck.md) |
 
 ---
 

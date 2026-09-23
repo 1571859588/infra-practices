@@ -291,9 +291,13 @@ grep -oE "Invalid __global__ (read|write) of size [0-9]+ bytes" mc.log | sort | 
   `cudaDeviceSynchronize` / `cudaGetLastError` / `cudaFree` 接连报
   `cudaErrorLaunchFailure (error 719)`，属于**同一个 bug 的余震**。
 
-> 那 x 和 y 各越界 24 个元素，为什么只报了 96 字节而不是 192？
-> 因为 `cudaMalloc` 把它们摆在哪儿不固定 —— 另一个 buffer 后面恰好是合法映射，
-> 就不触发报告。**所以条数会随运行波动（实测 6~10），报不报才是关键，报几条不是。**
+这个 6 + 4 = 10 是**稳定的**（连跑 3 次一致）。
+
+> 那 x 和 y 都越界读了 24 个元素、out 也越界写了 24 个，为什么只报了 x 的 96 字节？
+> 因为 **kernel 在第一条出错的访存指令处就被终止了**，y 的读和 out 的写根本没执行到。
+> 把 x 开大到不越界，报告就会顺延成 y 的 6 条 —— 这个对照实验、以及
+> `thread (122,0,0)` / `+0xc0` 这些数字怎么从 layout 和 SASS 推出来，
+> 见延伸篇 **[`v0_naive_memcheck.md`](v0_naive_memcheck.md)**。
 
 还有一点要有心理准备：越界会让 kernel 被强杀，所以脚本末尾的
 `torch.cuda.synchronize()` 一定会抛
@@ -366,7 +370,7 @@ launch 完成（add_masked），out 正确 = True
 | 直接跑 + 比对 `out` | ❌ | 结果完全正确，自测全 PASS |
 | 邻居张量被踩 | ⚠️ | 能看到，但要故意构造内存布局 |
 | `compute-sanitizer memcheck` | ❌ | 被 torch 缓存分配器挡住，0 errors |
-| `memcheck` + `PYTORCH_NO_CUDA_MEMORY_CACHING=1` | ✅ | **唯一可靠的办法**，还能报到 .py 行号 |
+| `memcheck` + `PYTORCH_NO_CUDA_MEMORY_CACHING=1` | ✅ | 本例能抓到，还能报到 .py 行号。但越界若整段落进邻居分配仍会 0 errors，要再加 `--padding`，见 [`v0_naive_memcheck.md` §7](v0_naive_memcheck.md) |
 | `TRITON_INTERPRET=1` | ⚠️ | 会 SIGABRT，但崩在 host 堆上：报错每次不同、无定位信息，甚至可能先打印出正确结果 |
 
 > **一句话：越界不会自己暴露，`mask=` 一律要写。**
@@ -814,7 +818,7 @@ rm -rf /tmp/vecadd_ex
 <!-- 自己复现时写在这里 -->
 
 - [ ] 我机器上的基线带宽是多少？和 87% 差多少？
-- [ ] 第 1 题的错误条数我这里是几条？（实测 `ERROR SUMMARY: 10` = 6 条真越界 + 4 条余震，会波动）
+- [ ] 第 1 题的错误条数我这里是几条？（实测稳定为 `ERROR SUMMARY: 10` = 6 条真越界 + 4 条余震）
 - [ ] 第 1 题 `TRITON_INTERPRET=1` 连跑 5 次，我这里出现了几种不同的 glibc 报错？
       （实测 4 种，退出码恒为 134）
 - [ ] 第 2.7 节的隔离实验，我这里向量化值多少钱？
