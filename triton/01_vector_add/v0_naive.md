@@ -310,24 +310,50 @@ CUDA_VISIBLE_DEVICES=7 TRITON_INTERPRET=1 timeout 300 $PY ex1c.py
 ```
 
 ```
-double free or corruption (!prev)
+double free or corruption (out)
 timeout: the monitored command dumped core
+[2]    926298 IOT instruction  CUDA_VISIBLE_DEVICES=7 TRITON_INTERPRET=1 timeout 300 $PY ex1c.py
+```
+
+⚠️ **这句报错每次都不一样，别对着字面去搜。** 同一个脚本连跑 5 次的实测：
+
+```
+第 1 次: malloc(): unaligned tcache chunk detected
+第 2 次: launch 完成（add_nomask），out 正确 = True     ← 先打印了正确结果！
+         corrupted size vs. prev_size                    然后在退出时才崩
+第 3 次: double free or corruption (out)
+第 4 次: malloc(): unaligned tcache chunk detected
+第 5 次: malloc(): unaligned tcache chunk detected
+```
+
+四种不同的 glibc 报错，**而且没有一种提到 Triton、kernel 或你的源码**。
+最坏的是第 2 次：**它先把正确答案打印出来了**，等到进程退出、glibc 去
+整理堆的时候才发现结构已经被踩坏 —— 崩溃点离出错点隔了整个程序。
+
+稳定的只有退出方式：
+
+```bash
+echo $?      # → 134，即 128 + 6 = SIGABRT，zsh 显示成 "IOT instruction"
 ```
 
 对照组 —— **同一个脚本，加个 `mask` 参数把 mask 切回来**：
 
 ```bash
 CUDA_VISIBLE_DEVICES=7 TRITON_INTERPRET=1 timeout 300 $PY ex1c.py mask
+echo $?      # → 0
 ```
 
 ```
 launch 完成（add_masked），out 正确 = True
 ```
 
-一个崩、一个过，**变量只有 mask 一个**，所以崩溃确实是它引起的。
+有 mask 稳定退 0，无 mask 稳定 SIGABRT，**变量只有 mask 一个**，
+所以崩溃确实是它引起的 —— 但这个结论是靠**跑对照组**得出的，
+不是报错信息告诉你的。
 
-解释器模式把访存搬到 host 上做，于是越界直接踩坏了**进程自己的堆**，
-得到的是一句 glibc 的抱怨 + core dump，**不告诉你是哪一行**。
+原因：解释器模式把访存搬到 host 上用 numpy 做，于是越界踩坏的是
+**进程自己的堆**，而不是显存。你拿到的是 glibc 事后发现堆结构不一致时的
+抱怨，**既不告诉你是哪一行，也不保证崩在出错的那一刻**。
 
 > 所以分工是：`TRITON_INTERPRET=1` 用来查**逻辑**错误（下标算错、mask 写反，
 > 可以在 kernel 里 `print`）；查**越界**要用 memcheck + `PYTORCH_NO_CUDA_MEMORY_CACHING=1`。
@@ -341,7 +367,7 @@ launch 完成（add_masked），out 正确 = True
 | 邻居张量被踩 | ⚠️ | 能看到，但要故意构造内存布局 |
 | `compute-sanitizer memcheck` | ❌ | 被 torch 缓存分配器挡住，0 errors |
 | `memcheck` + `PYTORCH_NO_CUDA_MEMORY_CACHING=1` | ✅ | **唯一可靠的办法**，还能报到 .py 行号 |
-| `TRITON_INTERPRET=1` | ⚠️ | 会崩，但崩在 host 堆上，无定位信息 |
+| `TRITON_INTERPRET=1` | ⚠️ | 会 SIGABRT，但崩在 host 堆上：报错每次不同、无定位信息，甚至可能先打印出正确结果 |
 
 > **一句话：越界不会自己暴露，`mask=` 一律要写。**
 > 这也意味着 `../README.md` §5 里「用 compute-sanitizer 验」需要补一个前提 ——
@@ -789,4 +815,6 @@ rm -rf /tmp/vecadd_ex
 
 - [ ] 我机器上的基线带宽是多少？和 87% 差多少？
 - [ ] 第 1 题的错误条数我这里是几条？（实测 `ERROR SUMMARY: 10` = 6 条真越界 + 4 条余震，会波动）
+- [ ] 第 1 题 `TRITON_INTERPRET=1` 连跑 5 次，我这里出现了几种不同的 glibc 报错？
+      （实测 4 种，退出码恒为 134）
 - [ ] 第 2.7 节的隔离实验，我这里向量化值多少钱？
