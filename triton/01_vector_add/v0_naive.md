@@ -180,14 +180,52 @@ $PY ex1b.py
 
 ### 1.4 步骤三：`compute-sanitizer` —— 按题面提示做，它抓不到
 
+前两步的脚本都不适合直接喂给 memcheck：`ex1.py` 跑了两个 kernel 不好归因，
+而 `ex1b.py` 里 `out = buf[:1000]` 是 1024 元素 buffer 的 view ——
+**写 1024 个元素对那块分配根本不越界**，结论会变味。
+
+所以单独写一个最小脚本，`out` 就老老实实开 1000 个元素。
+带一个 `mask` 参数，后面 §1.5、§1.6 都复用它：
+
+```bash
+cat > ex1c.py <<'PY'
+import sys
+import torch, triton, triton.language as tl
+
+@triton.jit
+def add_nomask(x_ptr, y_ptr, out_ptr, n, BLOCK_SIZE: tl.constexpr):
+    offs = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    tl.store(out_ptr + offs, tl.load(x_ptr + offs) + tl.load(y_ptr + offs))
+
+@triton.jit
+def add_masked(x_ptr, y_ptr, out_ptr, n, BLOCK_SIZE: tl.constexpr):
+    offs = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    m = offs < n
+    tl.store(out_ptr + offs,
+             tl.load(x_ptr + offs, mask=m) + tl.load(y_ptr + offs, mask=m), mask=m)
+
+kernel = add_masked if "mask" in sys.argv else add_nomask    # 加 mask 参数 = 对照组
+n, BS = 1000, 1024
+x = torch.randn(n, device="cuda"); y = torch.randn(n, device="cuda")
+out = torch.empty(n, device="cuda")
+kernel[(1,)](x, y, out, n, BLOCK_SIZE=BS)
+torch.cuda.synchronize()
+print(f"launch 完成（{kernel.__name__}），out 正确 = {torch.equal(out, x + y)}")
+PY
+```
+
+> 记住 `tl.store` 在第 **7** 行 —— 下一步 sanitizer 会把行号报出来。
+
+按题面提示跑：
+
 ```bash
 /usr/local/cuda/bin/compute-sanitizer --tool memcheck --target-processes all \
-    env CUDA_VISIBLE_DEVICES=7 $PY ex1c.py        # ex1c.py = 只留无 mask 那次 launch
+    env CUDA_VISIBLE_DEVICES=7 $PY ex1c.py
 ```
 
 ```
 ========= COMPUTE-SANITIZER
-launch 完成
+launch 完成（add_nomask），out 正确 = True
 ========= ERROR SUMMARY: 0 errors
 ```
 
@@ -214,40 +252,61 @@ memcheck 只知道驱动层面那一大段的边界，**段内怎么切它一无
 
 ```bash
 /usr/local/cuda/bin/compute-sanitizer --tool memcheck --target-processes all \
-    env CUDA_VISIBLE_DEVICES=7 PYTORCH_NO_CUDA_MEMORY_CACHING=1 $PY ex1c.py
+    env CUDA_VISIBLE_DEVICES=7 PYTORCH_NO_CUDA_MEMORY_CACHING=1 $PY ex1c.py 2>&1 | tee mc.log
 ```
 
 ```
 ========= Invalid __global__ read of size 16 bytes
-=========     at add_nomask+0xc0 in /tmp/vecadd_ex/ex1c.py:5
+=========     at add_nomask+0xc0 in /tmp/vecadd_ex/ex1c.py:7
 =========     by thread (122,0,0) in block (0,0,0)
-=========     Address 0x76405ca00fa0 is out of bounds
-=========     and is 1 bytes after the nearest allocation at 0x76405ca00000 of size 4,000 bytes
+=========     Address 0x7757e4a00fa0 is out of bounds
+=========     and is 1 bytes after the nearest allocation at 0x7757e4a00000 of size 4,000 bytes
+========= Invalid __global__ read of size 16 bytes
+=========     at add_nomask+0xc0 in /tmp/vecadd_ex/ex1c.py:7
+=========     by thread (123,0,0) in block (0,0,0)
+=========     Address 0x7757e4a00fb0 is out of bounds
+=========     and is 17 bytes after the nearest allocation at 0x7757e4a00000 of size 4,000 bytes
 ...
-========= ERROR SUMMARY: 6 errors
+========= ERROR SUMMARY: 10 errors
 ```
 
 三个细节值得看：
 
 1. **`of size 4,000 bytes`** —— 现在边界正好是 `1000 × 4`，和你脑子里的一致了。
-   地址 `...fa0` = 十进制 4000，正是第 1000 个元素。
-2. **`at add_nomask+0xc0 in ex1c.py:5`** —— sanitizer 直接报到 **Python 源码行号**。
-   Triton 把行号信息编进了 cubin，所以不用去读 PTX。
+   地址 `...fa0` = 十进制 4000，正是第 1000 个元素的位置。
+2. **`in ex1c.py:7`** —— sanitizer 直接报到 **Python 源码行号**，正是那句
+   `tl.store(...)`。Triton 把行号编进了 cubin，所以不用去读 PTX。
 3. **`read of size 16 bytes`** —— 一次读 16 字节，说明编译器把访存**向量化**成了
    `ld.global.v4.b32`（一条指令 4 个 float）。这条信息在第 2 题会再用到。
 
-还有两个现象要有心理准备：
+`ERROR SUMMARY: 10 errors` 这个数字要拆开看，**别直接当成"越界了 10 次"**：
 
-- **错误条数每次跑不一样**（实测 6 ~ 10 条）。越界的 24 个元素分布在 x 和 y 两个 buffer
-  后面，而 `cudaMalloc` 每次把三个 buffer 摆在哪儿不固定 —— 有时越界地址落进了
-  另一个合法分配里，就不报。**报几条不重要，报不报才重要。**
-- 越界访问会让 kernel 被强杀，所以脚本末尾的 `torch.cuda.synchronize()` 会抛
-  `CUDA error: unspecified launch failure`。这是预期的，不是另一个 bug。
+```bash
+grep -oE "Invalid __global__ (read|write) of size [0-9]+ bytes" mc.log | sort | uniq -c
+#       6 Invalid __global__ read of size 16 bytes
+```
+
+- **6 条**是真正的越界读，`6 × 16 B = 96 B` —— **正好等于越界的 24 个元素**，一条不多一条不少。
+- 剩下 **4 条**是越界之后 CUDA context 已经坏掉，后续
+  `cudaDeviceSynchronize` / `cudaGetLastError` / `cudaFree` 接连报
+  `cudaErrorLaunchFailure (error 719)`，属于**同一个 bug 的余震**。
+
+> 那 x 和 y 各越界 24 个元素，为什么只报了 96 字节而不是 192？
+> 因为 `cudaMalloc` 把它们摆在哪儿不固定 —— 另一个 buffer 后面恰好是合法映射，
+> 就不触发报告。**所以条数会随运行波动（实测 6~10），报不报才是关键，报几条不是。**
+
+还有一点要有心理准备：越界会让 kernel 被强杀，所以脚本末尾的
+`torch.cuda.synchronize()` 一定会抛
+`torch.AcceleratorError: CUDA error: unspecified launch failure`。
+**这是预期结果，不是另一个 bug** —— 它恰好也说明 §1.2 里那次"静默正确"有多侥幸。
 
 ### 1.6 步骤五：`TRITON_INTERPRET=1` 能替代吗？不能
 
+还是用 §1.4 那个 `ex1c.py`，不加参数就是无 mask 版：
+
 ```bash
-CUDA_VISIBLE_DEVICES=7 TRITON_INTERPRET=1 $PY ex1d.py      # 无 mask
+# 套一层 timeout：解释器模式极慢，而且这次注定要崩，别让它挂住终端
+CUDA_VISIBLE_DEVICES=7 TRITON_INTERPRET=1 timeout 300 $PY ex1c.py
 ```
 
 ```
@@ -255,11 +314,17 @@ double free or corruption (!prev)
 timeout: the monitored command dumped core
 ```
 
-对照组（**同一个脚本，只把 mask 加回去**）：
+对照组 —— **同一个脚本，加个 `mask` 参数把 mask 切回来**：
+
+```bash
+CUDA_VISIBLE_DEVICES=7 TRITON_INTERPRET=1 timeout 300 $PY ex1c.py mask
+```
 
 ```
-launch 完成，out 正确 = True
+launch 完成（add_masked），out 正确 = True
 ```
+
+一个崩、一个过，**变量只有 mask 一个**，所以崩溃确实是它引起的。
 
 解释器模式把访存搬到 host 上做，于是越界直接踩坏了**进程自己的堆**，
 得到的是一句 glibc 的抱怨 + core dump，**不告诉你是哪一行**。
@@ -701,6 +766,8 @@ lane 浪费 22%   →  −8%     （本文 §3.5）
 - [ ] 第 1 题：不加 `PYTORCH_NO_CUDA_MEMORY_CACHING=1` 时，memcheck 报几个 error？（应该是 0）
 - [ ] 第 1 题：加上之后，报错信息里的 `nearest allocation ... of size` 是多少？（应该是 4,000）
 - [ ] 第 1 题：报错里的 `read of size N bytes`，N 是几？为什么不是 4？
+- [ ] 第 1 题：`ERROR SUMMARY` 的条数里，有几条是真越界、几条是余震？真越界那几条
+      乘以 16 字节，对得上 24 个越界元素吗？
 - [ ] 第 2 题：`ncomp` 数一下方案 B 和方案 C 各编译了几次
 - [ ] 第 2 题：传 `a=1`（整数）会不会多编译一份？
 - [ ] 第 2 题：`common.check()` 的默认容差是多少？为什么 `x+y` 能过而 `x*a+y` 不能？
@@ -721,5 +788,5 @@ rm -rf /tmp/vecadd_ex
 <!-- 自己复现时写在这里 -->
 
 - [ ] 我机器上的基线带宽是多少？和 87% 差多少？
-- [ ] 第 1 题的错误条数我这里是几条？（实测在 6~10 之间浮动）
+- [ ] 第 1 题的错误条数我这里是几条？（实测 `ERROR SUMMARY: 10` = 6 条真越界 + 4 条余震，会波动）
 - [ ] 第 2.7 节的隔离实验，我这里向量化值多少钱？
