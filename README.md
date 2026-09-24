@@ -16,6 +16,12 @@ practices/
 ├── 综合练习/               ← 一个算子从写到 profile 的完整流程
 │   └── vector_mul2/          y = x*2，PyTorch / Triton / CUDA 三种写法对比
 │                             + nsys + ncu + compute-sanitizer 全流程实测
+├── profiler/              ← PyTorch 自带 profiler 练习（torch.profiler，不是 ncu/nsys）
+│   └── 01_matmul_add/        笔记 + 脚本 + 产物 + perfetto 截图
+│       ├── 01_matmul_add.md    record_function / activities / schedule / 时间线逐字段解读
+│       ├── 01_matmul_add.py    被剖析的脚本（y = x @ w + b）
+│       ├── run.sh              一键复现四组配置
+│       └── 01_matmul_add/      实测产物：Chrome trace json + key_averages 汇总表
 ├── triton/                ← 纯 Triton 练习，只练编程模型本身
 │   ├── 01_vector_add/        program_id / arange / mask
 │   ├── 02_fused_softmax/     规约 + 算子融合（4.3× 提速，最有说服力的一个）
@@ -38,6 +44,7 @@ practices/
 | 查 `nvcc`/`ncu`/`nsys`/`c++` 在哪、怎么跑 | 本文件 |
 | 解决 `ncu` 的 `ERR_NVGPUCTRPERM` | 本文件 [§6](#6-ncunsight-compute) |
 | 学 profiler 怎么用、报告怎么读 | [`综合练习/vector_mul2/`](综合练习/vector_mul2/README.md) |
+| 学 `torch.profiler`（Python 侧打点 / 时间线 / 耗时汇总表） | [`profiler/`](profiler/README.md) |
 | 对比 PyTorch / Triton / CUDA 三种写法 | [`综合练习/vector_mul2/`](综合练习/vector_mul2/README.md) §2 |
 | 练 Triton 本身（规约 / 融合 / 分块） | [`triton/`](triton/README.md) |
 | 练 CUDA C++（shared memory / bank conflict / 寄存器分块 / roofline） | [`cuda/`](cuda/README.md) |
@@ -469,6 +476,7 @@ nvcc -arch=sm_80 -Xptxas=-v -c kernel.cu    # 编译时直接打印占用信息
 | Profiling（时间线 + CPU 火焰图） | Docker + `--cap-add=SYS_ADMIN`，nsys 从宿主机挂载（§5.3） |
 | Profiling（kernel 微观） | **Docker + `--cap-add=SYS_ADMIN` + 容器 root**（§6.2） |
 | 正确性排查 | `compute-sanitizer`（系统 12.4，无需特殊权限） |
+| PyTorch 侧 profiling（不想装 / 不想用 ncu、nsys） | `torch.profiler`，见 [`profiler/01_matmul_add/`](profiler/01_matmul_add/01_matmul_add.md) |
 | 纯 Python / PyTorch 实验 | uv 项目 + `torch cu128`，或现成 env `cpp` / `vllm` / `dist_train` |
 | 多卡 / NCCL 测试 | `conda activate nccl-test`（nccl 2.30.7） |
 
