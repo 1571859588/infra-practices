@@ -21,6 +21,7 @@ practices/
 │       ├── 01_matmul_add.md    record_function / activities / schedule / 时间线逐字段解读
 │       ├── 01_matmul_add.py    被剖析的脚本（y = x @ w + b）
 │       ├── run.sh              一键复现四组配置
+│       └── exercises.py        7 道练习题的实测脚本（§6 的答案就是它跑出来的）
 │       └── 01_matmul_add/      实测产物：Chrome trace json + key_averages 汇总表
 ├── triton/                ← 纯 Triton 练习，只练编程模型本身
 │   ├── 01_vector_add/        program_id / arange / mask

@@ -329,7 +329,7 @@ GPU 时钟：                               ├─ kernel 执行 ─┤   → CU
 
 | | 是否并行 | 实测证据 |
 |---|---|---|
-| CPU 侧 | **串行**（单线程） | 20 条 CPU annotation 起点间隔中位 **75.7us**，自身宽 **47.5us** → 无一重叠 |
+| CPU 侧 | **串行**（单线程） | 20 条 CPU annotation 起点间隔中位 **74.6us**，自身宽 **46.6us** → 无一重叠 |
 | GPU kernel（同一 stream） | **也串行** | 本例只有默认流 `stream 7`，40 个 kernel 排队跑 |
 | **CPU 派活 vs GPU 干活** | ✅ **并行（异步）** | 这正是必须 `torch.cuda.synchronize()` 才能测准的原因 |
 | GPU kernel 之间 | 只有**多流/多卡**才真并行 | 本例没开多流，所以没有 |
@@ -386,6 +386,107 @@ GPU 窗口 17.730us  =  gemm 5.824us  +  GPU 空等 9.410us  +  add 2.496us
 > | `record_function` 只带 CUDA 那行 | 12.864 / 12.238 / 17.995 / **17.814** | ❌ 飘 46%，**永远别引用它**（原因见 §4.1.1 ⑤） |
 >
 > 也就是：**只有具体算子行的 GPU 时间是可复现的**，其余都是参考。
+
+### 4.1.2 一次 `step()` 的完整调度流程：Python → ATen → launch → GPU
+
+上面讲的是"表怎么读"，这一节讲这些行**在时间上是按什么顺序发生的**。
+下面全部是实测：取 `traces/64_bf16_none.json` 里 active 的第一步
+（`ProfilerStep#3`），把它内部的 CPU 事件按时间排出来，时刻是相对该步起点的偏移。
+
+```
+CPU 侧（python 2342407 / 主线程）                                     宽
+  +0.00  ┌─ ProfilerStep#3 ───────────────────────────────────────┐  83.09us
+ +12.50  │  ┌─ matmul_add_(64, 64) ────────────────────────────┐  │  59.42us
+ +18.15  │  │  ┌─ aten::matmul ──────────┐                     │  │  25.32us
+ +19.40  │  │  │ ┌─ aten::mm ─────────┐  │                     │  │  23.37us
+ +32.92  │  │  │ │cudaOccupancy… 0.80 │  │                     │  │
+ +35.14  │  │  │ │cudaLaunchKernel ①  │  │                     │  │   5.91us  → 入队 gemm
+ +45.86  │  │  │ └────────────────────┘  │  ┌─ aten::add ───┐ │  │  13.22us
+ +52.34  │  │  │                         │  │cudaLaunch ②   │ │  │   5.35us  → 入队 add
+ +71.92  │  └─────────────────────────────┴──┴───────────────┘  │
+  +83.09  └─────────────────────────────────────────────────────┘
+
+GPU 侧（python 0 / stream 7）                      ↑ CPU 下发完立刻返回，不等 GPU
+ +43.12        ┌── gemm 5.82 ──┐                    ┌── add 2.50 ──┐
+               └───────────────┘  ← 空等 11.65us →  └──────────────┘
+ +43.12  ┌──────── gpu_user_annotation 窗口 19.97us ────────────────┘
+```
+
+#### 逐步发生了什么
+
+| 时刻 | 设备 | 事件 | 宽 | 说明 |
+|---|---|---|---|---|
+| +0.00 | CPU | `ProfilerStep#3` 开始 | 83.09us | **每次 `prof.step()` 调用时** kineto 自动打的标签，包住这一整步 |
+| +12.50 | CPU | `matmul_add_(64, 64)` 开始 | 59.42us | `record_function.__enter__`，我的标签 |
+| +18.15 | CPU | `aten::matmul` | 25.32us | Python `torch.matmul` → **ATen dispatch**（查 dtype/device/shape，决定走哪个实现） |
+| +19.40 | CPU | `aten::mm` | 23.37us | 分派到 `mm`，准备调 cublas |
+| +32.92 | CPU | `cudaOccupancyMaxActive...` | 0.80us | cublas 算 launch 配置时查 kernel 占用率（**纯 CPU**，每个 gemm 一次） |
+| **+35.14** | CPU | `cudaLaunchKernel` ① | 5.91us | **把 gemm 排进 `stream 7` 的队列，然后立刻返回** —— kernel 此时还没跑 |
+| +45.86 | CPU | `aten::add` | 13.22us | 第二个算子的 dispatch |
+| **+52.34** | CPU | `cudaLaunchKernel` ② | 5.35us | 把 add 排进队列，同样立刻返回 |
+| +71.92 | CPU | `matmul_add_` 结束 | | `record_function.__exit__`，**CPU 这步干完了** |
+| +83.09 | CPU | `ProfilerStep#3` 结束 | | 进入下一步 |
+| **+43.12** | **GPU** | `ampere_...gemm` | **5.82us** | 比 CPU 下发（+35.14）晚 **8.0us** 才开始 —— 这就是 launch latency |
+| +48.94 | GPU | *（空等）* | 11.65us | gemm 跑完了，但 CPU 还没把 add 派下来 |
+| **+60.59** | **GPU** | `vectorized_...` | 2.50us | add kernel |
+| +43.12→+63.09 | GPU | `gpu_user_annotation` | 19.97us | 窗口 = 5.82 + 空等 11.65 + 2.50，**而 kernel 之和只有 8.32us** |
+
+最后一行正是 §4.1.1 ⑤ 那个 2.14 倍差的现场版（19.97 / 8.32 = 2.4 倍）。
+
+#### `ProfilerStep*` 到底是什么
+
+| 问题 | 答案 |
+|---|---|
+| 谁打的？ | **kineto 在每次 `prof.step()` 被调用时自动打**，不是我写的 `record_function` |
+| 为什么叫 `#N`？ | trace 里是 `ProfilerStep#N`，N 是 `prof.step()` 调用次数的 **0-based** 序号。因为 `wait=1+warmup=1`，active 的第 1 步是全局第 3 次调用 → **`#2`**；active=20 时记录的就是 **`#2` ~ `#21`** |
+| 为什么聚合表里是 `*`？ | `key_averages()` 把所有编号合并成一行，`*` 就是"合并了多个编号"的标记 |
+| 它的层级？ | **所有用户标签和算子的容器**（最顶层），所以表里它的 `CPU total` 一定最大 |
+| 不调用 `prof.step()` 会怎样？ | **根本不会有这一行** —— 这就是 §5 坑 1 / 练习 6 空报告的根本原因：挪到循环外只调 1 次，且那次还在 `wait` 阶段，于是连一个 active 步都没有 |
+| 它免费吗？ | **不免费**。`ProfilerStep#3` 宽 83.09us，里面的 `matmul_add_` 才 59.42us → **kineto 每步切换/落盘 buffer 要 ~24us** |
+
+#### 三个时序数字（把"并行 vs 串行"量化）
+
+| 指标 | 实测 | 含义 |
+|---|---|---|
+| CPU annotation 宽 / 两步间隔 | 46.6us / **74.6us** | 每步 CPU 干 46.6us，但两步之间隔 74.6us → 差的 **28us 是 `prof.step()` 自己的开销** |
+| GPU annotation 宽 / 两步间隔 | 16.1us / **74.5us** | GPU 每步"活跃窗口"16.1us，间隔跟 CPU 一样是 74.5us —— **节奏由 CPU 决定** |
+| CPU 下发 → GPU 开跑 | **8.0us** | launch latency |
+| GPU 每步真正在跑 | **8.32us**（5.82+2.50） | 只占间隔 74.5us 的 **11%** → **GPU 89% 的时间在等** |
+
+#### 一个反直觉的事实：CPU 跑第 3 步时，GPU 在干什么？
+
+实测：在 `ProfilerStep#3` 开始的时刻，**上一步的 kernel 早就跑完了**（t0−51us 就结束），
+GPU 一直空等到 +43.12us 才开始第 3 步的 gemm。
+
+> **异步 ≠ GPU 在忙。** 这里 CPU 是"派活的"、GPU 是"干活的"，
+> 但派活太慢，所以**等的一方是 GPU**。这也正是 §4.2 说"64×64 下 CPU 是瓶颈"的直接证据。
+
+顺带说清楚脚本里的同步：循环里**每步都没有 `synchronize()`**，只在最后
+`torch.cuda.synchronize()` 一次。所以 22 步是 CPU 一路下发、GPU 一边追着跑；
+同一 stream 内 kernel 严格按入队顺序执行，不需要也不能靠它并行。
+
+#### 复现命令
+
+```bash
+cd /mnt/public/nyt1/infra/practices/profiler/01_matmul_add/traces
+/mnt/public/nyt1/docqa/restored_envs/cpp/bin/python - <<'EOF'
+import json
+ev = json.load(open("64_bf16_none.json"))["traceEvents"]
+CATS = {"user_annotation", "cpu_op", "cuda_runtime", "cuda_driver"}
+cpu = sorted([e for e in ev if e.get("cat") in CATS], key=lambda e: e["ts"])
+gpu = sorted([e for e in ev if e.get("cat") in ("kernel", "gpu_user_annotation")], key=lambda e: e["ts"])
+step = [e for e in cpu if e["name"] == "ProfilerStep#3"][0]
+lo, hi = step["ts"], step["ts"] + step["dur"]
+inside = [e for e in cpu if lo - 1 <= e["ts"] <= hi + 1]
+t0 = inside[0]["ts"]
+print("== CPU 侧该步的事件序列 ==")
+for e in inside:
+    print(f'  +{e["ts"]-t0:7.2f}us  宽 {e["dur"]:6.2f}us  [{e["cat"]:<15}] {e["name"][:44]}')
+print("== 同一时刻 GPU 上在发生什么 ==")
+for e in [g for g in gpu if lo - 100 <= g["ts"] <= hi + 200]:
+    print(f'  +{e["ts"]-t0:7.2f}us  宽 {e["dur"]:6.2f}us  [{e["cat"]:<19}] {e["name"][:40]}')
+EOF
+```
 
 ### 4.2 三个规模/精度的对比（每步平均值，单位 us）
 
@@ -531,18 +632,184 @@ done
 
 ## 6. [练习] 试试看
 
-改完都跑 `--size 1024 --steps 5` 左右的小规模，几秒出结果：
+7 道题我**全部实测过**了，答案折叠在每题下面（点标题展开）—— 建议先自己猜，再对答案。
 
-1. 把标签换回固定字符串 `"matmul_add"`，表里的行数变化吗？
-2. 打开 `record_shapes=True`，`aten::mm` 那行的名字变成什么？
-3. 把 `schedule` 改成 `wait=0, warmup=0, active=5, repeat=1`，
-   循环次数跟着改成多少才对？前几步会有什么不同？
-4. 用 `with torch.profiler.record_function("outer"):` 套住整个 `step()`，
-   看嵌套标签在表里的层级和时间线上的效果（参考 §2.3 的实测）。
-5. 打开 `with_stack=True`，看 trace json 从 ~50KB 涨到多少。
-6. 把 `prof.step()` 挪到 `for` 循环外面，复现 §5 坑 1 的空报告。
-7. 把 `sort_by` 换成 `"self_cpu_time_total"`，在 64×64 那个规模下
-   哪一行会排到第一？（提示：CPU 侧开销占比在小矩阵时很高）
+实测脚本：[`exercises.py`](exercises.py)
+
+```bash
+cd /mnt/public/nyt1/infra/practices/profiler/01_matmul_add
+export CUDA_VISIBLE_DEVICES=3
+EX_OUT=/tmp/ex /mnt/public/nyt1/docqa/restored_envs/cpp/bin/python exercises.py
+```
+
+> 脚本默认把产物写到 `/tmp`（`EX_OUT` 可改），**不会碰 `traces/` 里已对齐的数据**。
+> 数字每次跑都会飘（CPU 侧尤其），但**行数、层级、倍数关系这些结论是稳的**。
+
+<details>
+<summary><b>Q1</b> 把标签换回固定字符串 <code>"matmul_add"</code>，表里的行数变化吗？</summary>
+
+**答：不变，还是 2 行。**
+
+实测（active=5）：
+
+```
+'matmul_add'  SelfCPU=131.9us  CPUtotal=378.2us  CUDA=36.9us  calls=5   ← CPU 侧事件
+'matmul_add'  SelfCPU=  0.0us  CPUtotal=  0.0us  CUDA=44.1us  calls=5   ← GPU 侧事件
+```
+
+**原因**：那两行不是"名字重复"，而是**两类事件各聚合成一行**（§7.3）——
+CPU 侧 `user_annotation` 和 GPU 侧 `gpu_user_annotation`。
+把 f-string 换成固定字符串，只是名字从 `matmul_add_(64, 64)` 变成 `matmul_add`，
+行数照旧是 2。
+
+> 所以 §5 坑 2 那"两行同名"**跟标签名没关系，改名字解决不了**。
+
+</details>
+
+<details>
+<summary><b>Q2</b> 打开 <code>record_shapes=True</code>，<code>aten::mm</code> 那行的名字变成什么？</summary>
+
+**答：名字不变，还是 `aten::mm` —— shape 根本没进 `.txt` 汇总表。**
+
+这是个反直觉的结果。实测（1024×1024，开 `record_shapes=True`）：
+
+```
+'aten::mm'  CUDA_avg=21.375us  calls=3          ← 名字没变
+key_averages 里 aten::mm.input_shapes = ''      ← 也是空的
+```
+
+shape 只进了 **Chrome trace**：9 个事件带上了 `Input Dims`，例如 `aten::mm` 的
+args 是：
+
+```
+'Input Dims'  : [[1024, 1024], [1024, 1024]]
+'Input Strides': [[1024, 1], [1024, 1]]
+'Input type'  : ['c10::BFloat16', 'c10::BFloat16']
+```
+
+**所以要看 shape 得去 perfetto**（点开事件看详情），或者读 `prof.events()` 里
+**单条**事件的 `input_shapes` —— 聚合后的 `key_averages()` 是空的。
+
+</details>
+
+<details>
+<summary><b>Q3</b> <code>schedule</code> 改成 <code>wait=0, warmup=0, active=5</code>：循环次数改多少？前几步有什么不同？</summary>
+
+**答：循环次数 = `wait + warmup + active` = 0 + 0 + 5 = 5 次**（原来 7 次）。
+
+实测对比（64×64、active=5，三次重跑）：
+
+| schedule | 循环 | 记录到 | `aten::mm` CUDA avg | 第 1 步 CPU | 稳定步 CPU |
+|---|---|---|---|---|---|
+| wait=1 warmup=1 | **7** | `#2`~`#6` | 4.793 / 4.973 / 4.960 us | 137~146us | ~49us |
+| wait=0 warmup=0 | **5** | `#0`~`#4` | **6.079 / 6.118 / 6.093 us** | **2761~2965us** | ~50us |
+
+（完整 5 步的 CPU annotation 长这样：
+wait=1 时 `137, 59, 52, 50, 49`；wait=0 时 `2765, 80, 53, 50, 48`。）
+
+**差别全在第 1 步**：wait/warmup 都归 0 后，**剖析器刚启动那一步被记进去了** ——
+它耗时 **2761~2965us**，是稳定值（~50us）的 **55~60 倍**（kineto 首次分配 buffer +
+CUPTI 首次回调 + cublas 首次 dispatch 全挤在这一步）。
+结果 `aten::mm` 的平均从 **~4.9 涨到 ~6.1us（+25%）**。
+
+**这就是 wait / warmup 存在的意义**：把启动抖动挡在记录窗外面。
+（§7.4 ④ 里那条 146.4us 的"第一条"就是它的残留 —— 即使 wait=1+warmup=1，
+前两步仍看得到收敛过程：97.4 → 73.3 → 51.5 → 48.7。）
+
+</details>
+
+<details>
+<summary><b>Q4</b> 嵌套 <code>record_function("outer")</code> 套住 <code>step()</code>：层级和时间线</summary>
+
+**答：层级照常嵌套，但 GPU 侧只投影最内层。**
+
+实测（active=5），表里 3 行：
+
+```
+outer               SelfCPU= 83.5us  CPUtotal=403.5us  CUDA=35.1us  calls=5
+matmul_add_(64,64)  SelfCPU=101.2us  CPUtotal=320.0us  CUDA=35.1us  calls=5
+matmul_add_(64,64)  SelfCPU=  0.0us  CPUtotal=  0.0us  CUDA=42.4us  calls=5   ← GPU 投影
+```
+
+- **层级**：`CPU total` 递减 `outer 403.5 → matmul_add_ 320.0 → aten::*`，
+  一眼看出谁包着谁（判断方法见 §4.1.1 ①）。
+- **时间线**：`user_annotation` 里 `outer` 5 条、`matmul_add_(64, 64)` 5 条，
+  perfetto 上是嵌套的两层 bar。
+- ⚠️ **但 GPU 侧只有最内层有投影**：`gpu_user_annotation` 里只有
+  `matmul_add_(64, 64)` 5 条，**`outer` 一条都没有**。
+  所以 `outer` 只有一行、`matmul_add_` 有两行 ——
+  **嵌套层数越多，越要确认"哪一层才有 GPU 侧数据"**。
+
+</details>
+
+<details>
+<summary><b>Q5</b> 打开 <code>with_stack=True</code>，trace json 从多大涨到多少？</summary>
+
+**答：46 KB → 458 KB，涨约 10 倍**（1024×1024、active=10）。
+
+| with_stack | json 大小 |
+|---|---|
+| False | **46.0 KB** |
+| True | **457.8 KB** |
+
+涨的原因是每个事件都附上了 Python 调用栈（`Call stack` 字段）。
+**仅仅 10 步就翻了 10 倍** —— 开 `with_stack` 前先想清楚要不要，
+几十步的训练循环很容易产出几百 MB 的 json。
+
+</details>
+
+<details>
+<summary><b>Q6</b> 把 <code>prof.step()</code> 挪到 <code>for</code> 循环外面，复现 §5 坑 1</summary>
+
+**答：事件总数只剩 2，表里一个算子都没有。**
+
+```
+---------------------------  ------------  ------------  ------------
+                       Name    Self CPU %      Self CPU   CPU total %   # of Calls
+---------------------------  ------------  ------------  ------------
+      cudaDeviceSynchronize        27.76%     917.628us        27.76%            1
+    Activity Buffer Request        72.24%       2.388ms        72.24%            1
+---------------------------  ------------  ------------  ------------
+```
+
+`aten::mm` / `aten::add` / `matmul_add_` / `ProfilerStep*` **全部消失**。
+
+**原因**：`prof.step()` 是 `schedule` 推进的唯一动力。它只在循环外被调用 1 次，
+`schedule` 就永远停在第 1 步（还在 `wait` 阶段），后面一次也没进 `active`。
+表里只剩"同步"和"缓冲区申请"这两件剖析器自身的事。
+
+> **排障口诀：报告是空的 → 先查 `prof.step()` 是不是在循环里。**
+
+</details>
+
+<details>
+<summary><b>Q7</b> <code>sort_by</code> 换成 <code>"self_cpu_time_total"</code>，64×64 下哪行排第一？</summary>
+
+**答：字面上是 `cudaDeviceSynchronize`，但它是干扰项；真正该看的是 `ProfilerStep*`。**
+
+实测（64×64、active=20，按 `self_cpu_time_total` 排序 Top 6）：
+
+| 排名 | 行 | Self CPU | 占比 | calls |
+|---|---|---|---|---|
+| 1 | `cudaDeviceSynchronize` | 1.871ms | 57.16% | **1** |
+| 2 | `ProfilerStep*` | 358.143us | 10.94% | 20 |
+| 3 | `matmul_add_(64, 64)` | 333.506us | 10.19% | 20 |
+| 4 | `aten::mm` | 304.122us | 9.29% | 20 |
+| 5 | `cudaLaunchKernel` | 199.921us | 6.11% | **40** |
+| 6 | `aten::add` | 154.983us | 4.73% | 20 |
+
+- **`cudaDeviceSynchronize` 排第一是"假"的**：只被调了 **1 次**（脚本末尾那次
+  sync），却因为 20 步总共才 3.274ms 而占到 57%。**它不是算子，看单次开销要先排除。**
+- 排除它之后，**第一名是 `ProfilerStep*`**（358.143us，10.94%）——
+  即"每步区间里**不属于任何 aten 算子**的 CPU 时间"，约 **17.9us/步**，
+  比真正的 `aten::mm`（304.122us，9.29%）还多。
+- **这正是提示里说的"小矩阵 CPU 侧开销占比很高"**：64×64 下 CPU 每步约 46us，
+  落在 aten 算子里的只是一部分，其余全花在 Python / dispatch / launch 上
+  （`cudaLaunchKernel` 40 次 = 199.9us，一次 5.0us，见 §4.1.1 ⑥）。
+- 对比 §4.1 按 `cuda_time_total` 排序时第一名是 `matmul_add_` 那行（356.290us）——
+  **换个 `sort_by` 看到的是另一个瓶颈**（CPU 侧 vs GPU 侧），两个都要看才完整。
+
+</details>
 
 ---
 
