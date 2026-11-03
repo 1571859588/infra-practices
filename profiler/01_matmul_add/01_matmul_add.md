@@ -35,12 +35,23 @@ PY=/mnt/public/nyt1/docqa/restored_envs/cpp/bin/python
 export CUDA_VISIBLE_DEVICES=7        # 先挑一张空闲卡
 
 $PY 01_matmul_add.py                             # 默认：64×64 bf16，记录 20 步
-bash run.sh                                      # 一键跑 README §4 的四组配置
+bash run.sh                                      # 一键跑 §4 的四组配置
 
-# 换个规模 / 换精度 / 换模式
+# 换个规模 / 换精度 / 换编译模式（五种，见 §4.5）
 $PY 01_matmul_add.py --size 1024 --steps 10
 $PY 01_matmul_add.py --dtype fp32
-$PY 01_matmul_add.py --mode COMPILE              # torch.compile 包装后再剖析
+$PY 01_matmul_add.py --size 64 --mode reduce-overhead
+
+# 五个模式横向比（稳态，100 次取中位数）—— §4.6
+$PY 02_bench_modes.py --size 64
+$PY 02_bench_modes.py --size 4096
+
+# 手动 CUDA Graph：eager / compile / compile+Graph 三方对比 —— §4.7
+$PY 03_matmul_add_graph.py --size 64
+$PY 03_matmul_add_graph.py --size 4096
+
+# 7 道练习题的实测脚本（§6 的答案就是它跑出来的）
+EX_OUT=/tmp/ex $PY exercises.py
 ```
 
 产物：
@@ -48,8 +59,13 @@ $PY 01_matmul_add.py --mode COMPILE              # torch.compile 包装后再剖
 ```
 traces/                            ← --trace-dir 的默认值就是它
 ├── <size>_<dtype>_<mode>.json    Chrome trace，拖进 https://ui.perfetto.dev 看时间线
-└── <size>_<dtype>_<mode>.txt     prof.key_averages().table(...) 的耗时汇总表
+├── <size>_<dtype>_<mode>.txt     prof.key_averages().table(...) 的耗时汇总表
+└── <size>_<dtype>_graph_*.json   03 脚本的三种方案（eager / compile / graph）
 ```
+
+⚠️ `01_matmul_add.py` 和 `03_matmul_add_graph.py` 的默认 `--trace-dir` 都是 `./traces`，
+会覆盖同名文件。**跑对比实验时用 `--trace-dir /tmp/xxx`**，别把 §4 里已经对齐的
+那四份产物冲掉。
 
 脚本里写了 python 绝对路径，**不需要 `conda activate`**。
 本机没有图形环境，所以看 trace 靠下载 json 到本地用 perfetto 打开。
@@ -595,7 +611,12 @@ for n in 64 128 256 512 1024 2048 4096; do
 done
 ```
 
-### 4.3 `--mode COMPILE`：融合 + 图模式
+### 4.3 `--mode COMPILE`（即现在的 `reduce-overhead`）：融合 + 图模式
+
+> 注：这一节是早期版本留下的产物，当时 `--mode` 只有 `COMPILE` 一个开关。
+> 现在脚本的 `--mode` 已扩展成五种（见 §4.5），这里的行为对应 **`reduce-overhead`**
+> （融合 + 套图）。结论不变，留着是因为它把「图模式多出来的拷贝开销」
+> 拍得很清楚 —— 这正是后面 §4.6 里 `reduce-overhead` 变慢的直接原因。
 
 | 配置 | 表里的算子 | 每步 GPU | 出处 |
 |---|---|---|---|
@@ -616,6 +637,241 @@ done
 
 ---
 
+### 4.4 三种优化方向
+
+前面 §4.1.2 把一次 `step()` 拆成了「CPU 派活」和「GPU 干活」两段。
+优化也就只能从这两端下手 —— 而且**先要搞清楚哪端是瓶颈**，否则白优化。
+
+64×64 的实测（§4.1.2 的三个时序数字）：
+
+```
+CPU 每步干 46.6us，两步间隔 74.6us
+GPU 每步只忙  8.32us，其余时间在等      → GPU 只占间隔的 11%
+```
+
+**这个规模下瓶颈是 CPU。** 于是优化方向有三条：
+
+| # | 端 | 思路 | 做法 | 省掉的是什么 |
+|---|---|---|---|---|
+| 1 | CPU | **减少启动次数** = 算子融合 | `torch.compile` 默认就做 | 3 个 kernel → 1 个：少 2 次 launch，kernel 之间不再有调度间隙 |
+| 2 | CPU | **消除启动动作** = CUDA Graph | `mode="reduce-overhead"`，或手动捕获（§4.7） | 运行时 CPU 不再逐个 launch，只发一次 `cudaGraphLaunch`；启动的活儿在捕获阶段一次性做完 |
+| 3 | GPU | **提升 kernel 本身** | `max-autotune` 自动调优 / 手写 Triton / 用 ncu 分析访存和占用率后改 | 让那 8.32us 变得更小 |
+
+三条不是互斥的，最优解通常是 **1 + 2**（融合拿 GPU 收益、套图拿 CPU 收益），
+这也是 §4.7 手动 CUDA Graph 的思路。
+
+> ⚠️ **方向选错了会越优化越慢。** §4.6 会看到：64×64 下只做「1」或只做「2」
+> 反而都比 eager 慢 —— 因为编译/套图在 CPU 侧引入的新开销，
+> 比它省下的 GPU 时间还多。
+
+---
+
+### 4.5 `torch.compile` 的五种模式
+
+`torch.compile(fn, mode=...)` 的 `mode` 决定编译策略。
+`01_matmul_add.py` 的 `--mode` 已经开放了全部五种：
+
+| 模式 | 内部生成 | 套 CUDA Graph | 说明 |
+|---|---|---|---|
+| `none` | 无（eager） | — | 不编译，作为基线（`none` 不是 `torch.compile` 的合法 mode，是脚本自己的标记） |
+| `default` | Inductor | 否 | 默认策略，**只做算子融合**，不开图 |
+| `reduce-overhead` | Inductor | **是** | 在 default 基础上加 CUDA Graph，降低启动开销 |
+| `max-autotune` | Inductor 自动调优 | **是** | 遍历多种 tile 尺寸选最优 kernel，再套图 |
+| `max-autotune-no-cudagraphs` | Inductor 自动调优 | 否 | 只做自动调优，不套图 |
+
+**一个容易忽略的环节**：开了 CUDA Graph 的模式（`reduce-overhead` /
+`max-autotune`），**输入张量必须先拷进固定的静态 buffer 再执行** ——
+因为图里记录的是「捕获那一刻的指针地址」，地址变了图就失效。
+执行完还要把结果拷回来。这两个拷贝在 trace 里就是
+`aten::_foreach_copy_` 和 `Memcpy D2D` 内核。
+
+**§4.3 里那个 3.626us/步的 `Memcpy DtoD` 就是它** —— 看，图模式的代价
+在 `01_matmul_add.py` 的 trace 里是直接能看到的。
+
+```bash
+cd /mnt/public/nyt1/infra/practices/profiler/01_matmul_add
+PY=/mnt/public/nyt1/docqa/restored_envs/cpp/bin/python
+export CUDA_VISIBLE_DEVICES=3
+
+# 单个模式，看 trace 里到底多了哪些 kernel
+$PY 01_matmul_add.py --size 64 --mode reduce-overhead --trace-dir /tmp/modes
+$PY 01_matmul_add.py --size 64 --mode max-autotune-no-cudagraphs --trace-dir /tmp/modes
+
+# 五种模式横向对比（100 次取中位数，看稳态）
+$PY 02_bench_modes.py --size 64
+$PY 02_bench_modes.py --size 4096
+```
+
+> trace 只反映**单次 profile 的瞬时分布**（还带着 profiler 自身的开销）。
+> 要看稳态性能得用 `02_bench_modes.py`：不开 profiler，跑 100 次统计。
+
+---
+
+### 4.6 实测：64×64 与 4096×4096，结论完全相反
+
+`02_bench_modes.py --size 64`（bf16，每模式 100 次）：
+
+| mode | 编译(s) | 吞吐(us/次) | 单步中位 | 单步p95 | relative | 说明 |
+|---|---|---|---|---|---|---|
+| `none` | 0.22 | **62.7** | 12.3 | 13.3 | **1.00x** | eager 基线 |
+| `default` | 1.56 | 112.7 | 12.3 | 13.3 | 1.80x | 只融合 |
+| `reduce-overhead` | 0.08 | 139.8 | 14.3 | 17.4 | 2.23x | 融合 + 图 |
+| `max-autotune` | 0.07 | 184.0 | 11.3 | 2503.7 | 2.94x | 调优 + 图 |
+| `max-autotune-no-cudagraphs` | 0.07 | 130.8 | **7.2** | 8.2 | 2.09x | 只调优，不套图 |
+
+**结论：64×64 下所有编译模式都比 eager 慢（1.80~2.94 倍）。**
+
+原因正是 §4.4 说的「方向选错」：小矩阵是**开销受型**的，eager 的瓶颈在 CPU 派活，
+而编译优化的是 GPU 上的 kernel，却在 CPU 侧引入了三笔新开销：
+
+1. **每次调用的 Python 包装层**（TorchDynamo 缓存查找、字节码、`AOTDispatcher` 等）
+   —— 所有编译模式都躲不掉，主要花在每次对输入做形状/属性检查、查编译缓存上。
+2. **静态 buffer 拷贝**（`fill` / `_foreach_copy_`）—— 只有套图的模式有，
+   输入输出各拷一次，每个 kernel 还要多一次 launch。
+3. **CUDA Graph 的管理与启动**（`cudaGraphLaunch`）—— 同样只有套图的模式有。
+
+这三笔加起来，远超它省下的那点 GPU 时间，于是编译反而更慢。
+这也解释了为什么 **`max-autotune-no-cudagraphs` 是最接近 eager 的**
+（它只背第 1 笔，没有第 2、3 笔）。
+
+`02_bench_modes.py --size 4096`：
+
+| mode | 编译(s) | 吞吐(us/次) | 单步中位 | 单步p95 | relative | 说明 |
+|---|---|---|---|---|---|---|
+| `none` | 0.21 | 1559.5 | 670.7 | 3291.1 | 1.00x | eager 基线 |
+| `default` | 1.96 | **1464.0** | 668.7 | 3290.1 | **0.94x** | 只融合 |
+| `reduce-overhead` | 0.14 | 1926.6 | 836.6 | 3448.8 | **1.24x** ← 最慢 | 融合 + 图 |
+| `max-autotune` | 3.68 | 1875.8 | 841.2 | 3454.0 | 1.20x | 调优 + 图 |
+| `max-autotune-no-cudagraphs` | 0.21 | 1528.7 | **668.7** | 3294.2 | **0.98x** | 只调优，不套图 |
+
+**结论完全反过来**：
+
+1. **不套图的两种模式反超 eager**：大矩阵是**计算受型**的，Inductor 自动调优出来的
+   Triton 融合 kernel 能跑赢 cublas 的默认 kernel（`default` 0.94x、`no-cudagraphs` 0.98x）。
+2. **套图的两种反而最慢**（1.20~1.24x）：4096×4096 bf16 的张量是 33.5MB，
+   每步把输入往静态 buffer 拷一遍、再把结果拷回来，两次拷贝就是几千 us，
+   能吃掉省下的全部收益。**规模越大，图模式的拷贝代价越离谱。**
+
+> **一句话**：`torch.compile` 解决的是「GPU 上 kernel 跑得快不快」，
+> CUDA Graph 解决的是「CPU 派活快不快」。小矩阵要的是后者、
+> 大矩阵要的是前者 —— 而 `reduce-overhead` 把两件事捆在一起卖，
+> 于是两头都不讨好。要两个都要，得自己动手（§4.7）。
+
+#### 关于口径：为什么这里用「吞吐」而不是「每次 sync 后计时」
+
+`02_bench_modes.py` 用的是 **pipelined**：连续下发 100 次、最后统一 sync 一次，
+主指标 = 整个循环墙钟 / 次数。
+
+之所以不用更直观的「每次 `sync()` 后再计时」，是因为实测这台机器上
+**让 GPU 完全空闲再唤醒有约 2.5ms 的固定代价**：
+
+```
+fn + sync   1 次  → 2492us
+fn + sync  10 次  → 2562us     ← 只多了 70us，说明 2.49ms 是固定开销
+fn + sync 100 次  → 3274us
+```
+
+它跟被测算子毫无关系，却会把 64×64 的真实耗时（~10us）抬高两个数量级。
+pipelined 下 GPU 不会彻底空闲，中位数稳定在 11.3us。
+
+（上表 `max-autotune` 那行 p95 = 2503.7us，就是这个幽灵偶尔混进来了 ——
+看中位数 11.3us 才是真实水平。这也是为什么要看中位数而不是平均数。）
+
+---
+
+### 4.7 手动 CUDA Graph：把「融合」和「套图」分开做
+
+`reduce-overhead` 的问题在于它把编译和套图**耦合**在一起，还带着不小的
+固定开销。所以我们完全可以手动完成这件事：
+
+> **先用 `max-autotune-no-cudagraphs` 拿到融合 kernel，再手动把它捕获进 CUDA Graph。**
+
+脚本：`03_matmul_add_graph.py`。
+
+```python
+cf = torch.compile(fn, mode="max-autotune-no-cudagraphs")
+xs, ws, bs = x.clone(), w.clone(), b.clone()      # ① 输入要在固定地址
+for _ in range(3):
+    cf(xs, ws, bs)                                #    预热：让编译先完成
+    torch.cuda.synchronize()
+
+g = torch.cuda.CUDAGraph()
+with torch.cuda.graph(g):
+    y = cf(xs, ws, bs)                            # ② 捕获：kernel 只记录不执行
+torch.cuda.synchronize()
+g.replay()                                        # ③ 捕获完必须重放一次才有值
+```
+
+三个要点，错一个就是错的数或者直接报错：
+
+1. **输入必须驻留静态 buffer** —— 图里记录的是「捕获那一刻的指针地址」，
+   之后每次 `replay()` 都往那些地址读写。所以要先 `clone()` 一份专用副本。
+2. **捕获只记录不执行** —— `with torch.cuda.graph(g)` 里 kernel 只是被记进图，
+   并没有真跑。捕获完**必须 `replay()` 一次**，否则 `y` 是未初始化的。
+   （脚本里 replay 完立刻跟 eager 的参考值比了一次，确认数没算错。）
+3. **预热和捕获必须在 profiler 之外完成** —— 编译、显存分配、图捕获都是准备工作，
+   会污染 profile 数据；而且捕获期间不允许 CUDA 同步。
+
+#### 三种方案的实测对比
+
+`03_matmul_add_graph.py --size 64` / `--size 4096`
+（profiler 下，active=8 步；含 profiler 自身开销，所以比无 profiler 时偏大）：
+
+| 方案 | 64×64 CPU | 64×64 GPU | 4096 CPU | 4096 GPU |
+|---|---|---|---|---|
+| eager | 84.9us | 7.0us | 87.1us | 1.321ms |
+| compile（无图） | 161.4us | 3.0us | 171.6us | 1.280ms |
+| **compile + 手动 Graph** | **42.0us** | 2.7us | **62.3us** | 1.271ms |
+
+三个结论：
+
+1. **64×64 下手动 Graph 把 CPU 从 84.9us 打到 42.0us（−51%，比 eager 还快 2 倍）**，
+   同时 GPU 从 7.0us 降到 2.7us（融合生效）。**「融合」和「套图」两手都要**，
+   单做一手都不行 —— 这正是 §4.6 里 `reduce-overhead`（1.24x / 2.23x）
+   做不到的组合。
+2. **`compile`（无图）的 CPU 反而涨到 161.4us**（eager 的 1.9 倍）：
+   省下的 launch 开销，远不够抵 Dynamo 每次调用的 Python 包装成本。
+   只融合不套图，在小矩阵上是**净亏损**。
+3. **4096 下 CPU 依然是 graph 最低**（62.3 vs eager 87.1），GPU 三者差不多
+   （1.27~1.32ms）—— 大矩阵 GPU 是瓶颈，优化 CPU 收益有限，但也不亏。
+
+#### 一个测量上的坑：graph 方案的 GPU 时间不能从 `key_averages` 取
+
+CUDA Graph replay 的 kernel 是 `cudaGraphLaunch` **一次性提交**的，
+kineto 不会把它的 GPU 时间归到 CPU 侧那个 `ProfilerStep*` 行上 ——
+实测 `device_time_total` 是 **0**，但 trace 里其实有 9 个
+`triton_tem_fused_addmm_0` kernel。
+
+脚本因此改成从 Chrome trace 里量，而且要用 **`gpu_user_annotation` 的窗口**
+去圈 kernel，不能用 CPU 侧窗口：
+
+```
+CPU 连续下发、GPU 追着跑，kernel 的时间戳整体落在 CPU 窗口之外
+（实测 eager 第一步的 kernel 比 ProfilerStep#N 起点晚 396us，
+ 跑到 CPU 窗口结束后 2.5ms 还没执行完）
+```
+
+`gpu_user_annotation` 本来就在 GPU 时间轴上，用它圈才对得上
+（eager 那步恰好框住 2 个 kernel：4.70 + 2.21 = 6.91us）。
+
+#### 复现
+
+```bash
+cd /mnt/public/nyt1/infra/practices/profiler/01_matmul_add
+PY=/mnt/public/nyt1/docqa/restored_envs/cpp/bin/python
+export CUDA_VISIBLE_DEVICES=3
+
+$PY 03_matmul_add_graph.py --size 64    --trace-dir /tmp/g64
+$PY 03_matmul_add_graph.py --size 4096  --trace-dir /tmp/g4096
+$PY 03_matmul_add_graph.py --size 64 --scheme graph     # 只看一种方案
+```
+
+产物是 `<size>_<dtype>_graph_{eager,compile,graph}.json`，三份拖进 perfetto
+可以直接对比：eager 每步两个 kernel、compile 每步一个 triton kernel、
+graph 每步只有一个 `cudaGraphLaunch`。
+
+---
+
 ## 5. 踩坑清单
 
 | # | 坑 | 现象 | 正确做法 |
@@ -623,10 +879,15 @@ done
 | 1 | **`prof.step()` 写在循环外**（§2.4 那个示例的写法） | 实测：报告里**一个算子都没有**，只剩 `cudaDeviceSynchronize` + `Activity Buffer Request` 两行，事件总数 2 | `prof.step()` 必须在**每一步末尾**调用，它是 `schedule` 推进的唯一动力 |
 | 2 | **同名标签在表里出现两行** | `matmul_add_(64, 64)` 有两行：一行 `Self CPU 0.000us` 只带 CUDA 数据，一行只带 CPU 数据；`Self CUDA %` 会算出 **>100%**（四轮实测 154.6% / 147.1% / 216.2% / **214.0%**，飘得很厉害） | CPU / CUDA 事件是分开聚合的，而且**两行量的根本不是同一个东西**（详见 §4.1.1 ⑤）。百分比别跨行加总，也别拿这一行比较性能（见 §4.1 的稳定性表） |
 | 3 | 循环次数不够 | 循环跑不满 `wait + warmup + active` 步 | 循环次数取 `wait + warmup + active`（脚本里是 `range(args.steps + 2)`），否则 `# of Calls` 对不上 |
-| 4 | `--mode` 的 default 不在 choices 里 | `choices=["COMPILE","EAGER"]` 但 `default="none"`（照抄视频）——argparse **不校验 default**，所以能跑；但手写 `--mode none` 会被拒绝 | 这是"隐式 None"的写法，知道就行；写成显式 `--mode eager` 更清楚 |
+| 4 | ~~`--mode` 的 default 不在 choices 里~~（**已修**） | 原来照抄视频写的 `choices=["COMPILE","EAGER"]` + `default="none"`：argparse **不校验 default**，所以能跑，但手写 `--mode none` 会被拒 | 现改成 `choices=COMPILE_MODES`（五种，见 §4.5），`none` 是合法值 |
 | 5 | 没有预热 | 第一次 matmul 会触发 cublas handle 创建、算子库加载、`torch.compile` 编译，全被算进去 | 剖析前跑 `args.warm` 步并 `torch.cuda.synchronize()`；`sqlite`/表中这些一次性开销会污染前几步 |
 | 6 | 报告里 `## Call CompiledFxGraph` 的 `Self CUDA` 比它内部的 `addmm` 还大 | COMPILE 组：37.641us/步，而内部 `addmm` 只有 29.267us/步（图模式下 GPU 时间被重复归属，口径存疑） | 读数以**具体算子行**或 **trace 时间线**为准，别直接引用 `CompiledFxGraph` 那一行的耗时 |
 | 7 | 忘了 `torch.cuda.synchronize()` | kernel 是异步的，不 sync 就退出可能漏掉最后几条事件 | 预热段和 profile 段结束后各 sync 一次（脚本里都有） |
+| 8 | **测性能时「每次 sync 后再计时」** | 实测这台机器上，让 GPU 完全空闲再唤醒有 **~2.5ms 固定代价**（`fn+sync` 1 次 2492us、10 次 2562us、100 次 3274us），64×64 的真实耗时只有 ~10us，被抬高两个数量级 | 用 **pipelined**：连续下发 N 次、最后只 sync 一次；主指标取整个循环墙钟 / 次数（见 §4.6 口径说明，以及 `02_bench_modes.py` 的 docstring） |
+| 9 | GPU 时间用 CPU 侧窗口去圈 kernel | `ProfilerStep#N` 的窗口框不住它的 kernel —— CPU 连续下发、GPU 追着跑，实测 eager 第一步的 kernel 比窗口起点晚 **396us**，窗口结束后 2.5ms 还没跑完 | 用 **`gpu_user_annotation`**（本来就在 GPU 时间轴上）的窗口去圈，见 §4.7 |
+| 10 | CUDA Graph 方案的 GPU 时间从 `key_averages` 取 | replay 的 kernel 由 `cudaGraphLaunch` 一次性提交，kineto 不把它归到 `ProfilerStep*` 行上 —— 实测 `device_time_total` = **0**，但 trace 里其实有 9 个 triton kernel | 去 Chrome trace 里按 `gpu_user_annotation` 窗口量（§4.7） |
+| 11 | 在 `torch.cuda.graph()` 捕获期间调 `synchronize()` | 捕获阶段不允许 CUDA 同步，会报错 | `synchronize()` 放在 `with` 块**外面**；捕获完再 `replay()` 一次才有值 |
+| 12 | 把编译/图捕获放进 profiler 里 | 编译、显存分配、图捕获都是一次性准备工作，会污染 profile 数据 | 预热和捕获放在 `with profile(...)` **之前**（`03_matmul_add_graph.py` 的 `build_step()` 就是这么做的） |
 
 ---
 

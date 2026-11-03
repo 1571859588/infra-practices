@@ -19,10 +19,13 @@ practices/
 ├── profiler/              ← PyTorch 自带 profiler 练习（torch.profiler，不是 ncu/nsys）
 │   └── 01_matmul_add/        笔记 + 脚本 + 产物 + perfetto 截图
 │       ├── 01_matmul_add.md    record_function / activities / schedule / 时间线逐字段解读
-│       ├── 01_matmul_add.py    被剖析的脚本（y = x @ w + b）
+│       │                       + 优化实战：五种编译模式对比、手动 CUDA Graph（§4.4~4.7）
+│       ├── 01_matmul_add.py    被剖析的脚本（y = x @ w + b），--mode 支持五种编译模式
+│       ├── 02_bench_modes.py   五种编译模式横向 bench（100 次取中位数）
+│       ├── 03_matmul_add_graph.py  手动 CUDA Graph：eager / compile / compile+Graph 对比
 │       ├── run.sh              一键复现四组配置
-│       └── exercises.py        7 道练习题的实测脚本（§6 的答案就是它跑出来的）
-│       └── 01_matmul_add/      实测产物：Chrome trace json + key_averages 汇总表
+│       ├── exercises.py        7 道练习题的实测脚本（§6 的答案就是它跑出来的）
+│       └── traces/             实测产物：Chrome trace json + key_averages 汇总表
 ├── triton/                ← 纯 Triton 练习，只练编程模型本身
 │   ├── 01_vector_add/        program_id / arange / mask
 │   ├── 02_fused_softmax/     规约 + 算子融合（4.3× 提速，最有说服力的一个）
@@ -45,7 +48,8 @@ practices/
 | 查 `nvcc`/`ncu`/`nsys`/`c++` 在哪、怎么跑 | 本文件 |
 | 解决 `ncu` 的 `ERR_NVGPUCTRPERM` | 本文件 [§6](#6-ncunsight-compute) |
 | 学 profiler 怎么用、报告怎么读 | [`综合练习/vector_mul2/`](综合练习/vector_mul2/README.md) |
-| 学 `torch.profiler`（Python 侧打点 / 时间线 / 耗时汇总表） | [`profiler/`](profiler/README.md) |
+| 学 `torch.profiler`（Python 侧打点 / 时间线 / 耗时汇总表） | [`profiler/01_matmul_add/`](profiler/01_matmul_add/01_matmul_add.md) |
+| 想让小算子跑快（融合 / CUDA Graph / 自动调优怎么选） | [`profiler/01_matmul_add/`](profiler/01_matmul_add/01_matmul_add.md) §4.4~4.7 |
 | 对比 PyTorch / Triton / CUDA 三种写法 | [`综合练习/vector_mul2/`](综合练习/vector_mul2/README.md) §2 |
 | 练 Triton 本身（规约 / 融合 / 分块） | [`triton/`](triton/README.md) |
 | 练 CUDA C++（shared memory / bank conflict / 寄存器分块 / roofline） | [`cuda/`](cuda/README.md) |

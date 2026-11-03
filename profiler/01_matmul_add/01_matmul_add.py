@@ -1,27 +1,30 @@
 # -*- coding: utf-8 -*-
-"""01_matmul_add.py —— torch.profiler 最小可跑示例
+"""01_matmul_add.py —— torch.profiler 最小可跑示例 + 五种编译模式
 
-复现的内容（对应 README.md §2.3 / §2.4）：
+复现的内容（对应 README.md）：
 
-  1. torch.profiler.record_function   给一段代码打上自定义标签
-  2. torch.profiler.profile           配置 activities（CPU / CUDA 分别收哪些事件）
-  3. torch.profiler.schedule          wait / warmup / active / repeat 四段规则
-  4. prof.export_chrome_trace         Chrome trace，拖进 perfetto 看时间线
-  5. prof.key_averages().table        按 cuda_time_total 排序的耗时汇总
+  1. torch.profiler.record_function   给一段代码打上自定义标签      §2.3
+  2. torch.profiler.profile           配置 activities（收哪些事件）  §2.4
+  3. torch.profiler.schedule          wait / warmup / active / repeat §2.4
+  4. prof.export_chrome_trace         Chrome trace，拖进 perfetto    §3.5
+  5. prof.key_averages().table        按 cuda_time_total 排序的汇总   §3.5
+  6. torch.compile(fn, mode=...)      五种编译模式，看融合 / 套图    §4.4 §4.5
 
 被剖析的算子是 ``y = x @ w + b``，注意它**不是**一个 kernel：
-matmul 和 add 是两个独立的算子，这正是为什么要在 profiler 里把它们
-当成一段「业务逻辑」整体看待。
+eager 下 matmul 和 add 是两个独立的算子（两次 launch），
+这正是为什么要在 profiler 里把它们当成一段「业务逻辑」整体看待。
 
 用法：
 
     PY=/mnt/public/nyt1/docqa/restored_envs/cpp/bin/python
-    export CUDA_VISIBLE_DEVICES=7          # 先挑一张空闲卡
+    export CUDA_VISIBLE_DEVICES=3          # 先挑一张空闲卡
 
-    $PY 01_matmul_add.py                   # 默认 64x64 bf16，20 步
-    $PY 01_matmul_add.py --size 1024 --steps 5
-    $PY 01_matmul_add.py --dtype fp32
-    $PY 01_matmul_add.py --mode COMPILE    # torch.compile 包装后再剖析
+    $PY 01_matmul_add.py                                  # 默认 64x64 bf16 eager
+    $PY 01_matmul_add.py --size 4096
+    $PY 01_matmul_add.py --size 64 --mode reduce-overhead  # 融合 + CUDA Graph
+    $PY 01_matmul_add.py --size 64 --mode max-autotune-no-cudagraphs  # 只融合不套图
+
+看五个模式的横向对比、以及稳态性能（100 次取中位数）用 ``02_bench_modes.py``。
 """
 
 import argparse
@@ -29,17 +32,40 @@ import os
 
 import torch
 
+# torch.compile 的合法 mode（"none" 是我们自己的标记，表示不编译）
+COMPILE_MODES = ["none", "default", "reduce-overhead",
+                 "max-autotune", "max-autotune-no-cudagraphs"]
+
+# 会套 CUDA Graph 的模式：输入会被复制到静态 buffer，输出也会被复用
+CUDA_GRAPH_MODES = {"reduce-overhead", "max-autotune"}
+
+# 早期版本的 --mode 只有 COMPILE / EAGER 两个开关。保留别名，
+# 免得 run.sh 和 traces/1024_bf16_COMPILE.* 这些已对齐的产物失效。
+MODE_ALIAS = {"COMPILE": "reduce-overhead", "EAGER": "none"}
+
 
 def parse_arguments():
     p = argparse.ArgumentParser()
     p.add_argument("--size", type=int, default=64, help="矩阵尺寸 N")
     p.add_argument("--dtype", choices=["bf16", "fp32"], default="bf16")
-    p.add_argument("--mode", choices=["COMPILE", "EAGER"], default="none",
-                   help="包装模式：COMPILE 用 torch.compile，none/EAGER 表示 eager")
+    p.add_argument("--mode", choices=COMPILE_MODES + list(MODE_ALIAS), default="none",
+                   help="编译模式，见 README §4.5（COMPILE/EAGER 是旧别名）")
     p.add_argument("--steps", type=int, default=20, help="正式记录的步数 (active 阶段)")
     p.add_argument("--warm", type=int, default=10, help="剖析前预热步数，用于让 torch.compile 完成编译/图捕获")
     p.add_argument("--trace-dir", default="./traces", help="trace 输出目录")
     return p.parse_args()
+
+
+def build_fn(mode):
+    """按 mode 构建要执行的算子：none 走 eager，其余交给 torch.compile。"""
+    mode = MODE_ALIAS.get(mode, mode)      # COMPILE -> reduce-overhead
+
+    def fn(x, w, b):
+        return torch.add(torch.matmul(x, w), b)
+
+    if mode == "none":
+        return fn
+    return torch.compile(fn, mode=mode)
 
 
 def main():
@@ -50,13 +76,8 @@ def main():
     w = torch.randn(args.size, args.size, device="cuda", dtype=dtype)
     b = torch.randn(args.size, args.size, device="cuda", dtype=dtype)
 
-    # 定义乘加算子：y = x @ w + b
-    def fn(x, w, b):
-        return torch.add(torch.matmul(x, w), b)
-
     # 按模式包装算子
-    if args.mode == "COMPILE":
-        fn = torch.compile(fn)
+    fn = build_fn(args.mode)
 
     # 打标签：record_function。
     # 标签里带上 shape —— 这样 matmul_add_((64, 64)) 会直接出现在时间线上，
