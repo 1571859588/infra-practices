@@ -24,3 +24,17 @@ __pycache__/
 
 # cuda/lesson_CUDA-code: 第三方课程代码，排除其编译产物 / 编辑器配置 / Windows 下载残留
 cuda/lesson_CUDA-code/**/*.vscode/
+cuda/lesson_CUDA-code/1.2lesson/test
+cuda/lesson_CUDA-code/1.2lesson/test2
+cuda/lesson_CUDA-code/2.1lesson/hello
+cuda/lesson_CUDA-code/2.1lesson/hello2
+cuda/lesson_CUDA-code/2.1lesson/hello2_cpp
+cuda/lesson_CUDA-code/2.1lesson/hello_cpp
+cuda/lesson_CUDA-code/2.2lession/helloworld2
+cuda/lesson_CUDA-code/2.3lesson/ex2_2
+cuda/lesson_CUDA-code/3.1lesson/matrixSum1D_CPU
+cuda/lesson_CUDA-code/3.1lesson/matrixSum1D_GPU_if_device
+cuda/lesson_CUDA-code/3.1lesson/setDevice
+cuda/lesson_CUDA-code/3.2lesson/errorCheckFunction2
+cuda/lesson_CUDA-code/3.2lesson/errorCheckKernel2
+cuda/lesson_CUDA-code/3.3lesson/eventRecordTime2
