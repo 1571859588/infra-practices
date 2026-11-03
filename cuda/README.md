@@ -1,7 +1,7 @@
 # cuda/ —— 纯 CUDA C++ 练习
 
-和 `../triton/` 一一对应的 CUDA 版本。**同样的三个问题，用 CUDA 再做一遍**，
-目的是看清两件事：
+和 `../triton/` 对应的 CUDA 版本（01~03 一一对应，04 是 CUDA 侧的
+补充练习）。目的是看清两件事：
 
 1. Triton 到底替你做了什么（shared memory、bank conflict、
    寄存器分块、向量化、边界 mask —— 全是编译器的活）；
@@ -23,8 +23,9 @@ fp32 算力 **19.5 TFLOP/s**），CUDA 12.4，`-arch=sm_80`，`CUDA_VISIBLE_DEVI
 | [`01_vector_add/`](01_vector_add/README.md) | `out = x + y` | memory-bound | 合并访存 → float4 → grid-stride | 84.8% 峰值带宽（≈ 天花板） |
 | [`02_reduction/`](02_reduction/README.md) | `sum(x)` | memory-bound | divergence → bank conflict → shuffle → grid-stride | **5.58x**，CUB 的 96.9% |
 | [`03_matmul/`](03_matmul/README.md) | `C = A × B` | **compute-bound** | shared 分块 → 寄存器分块 → float4 | **6.7x**，cuBLAS 的 88.5% |
+| [`04_relu/`](04_relu/README.md) | `out = max(x, 0)` | memory-bound（无优化空间） | 分支 → in-place → **融合** | 自身 84.3% 天花板；**融合 1.70x** |
 
-三个练习是**递进**的，建议按顺序做：
+前三个练习是**递进**的，建议按顺序做；04 是一个反着来的小练习：
 
 - **01** 建立基本功：什么是合并访存、怎么量带宽、为什么 `~85%` 就是上限。
   这里的结论是"优化空间很小"——**最简单的写法已经接近最优**。
@@ -33,13 +34,16 @@ fp32 算力 **19.5 TFLOP/s**），CUDA 12.4，`-arch=sm_80`，`CUDA_VISIBLE_DEVI
 - **03** 换赛道：第一个 compute-bound 的问题，
   整个思路从"怎么少搬数据"变成"**怎么提高算术强度**"，
   连 occupancy 的结论都反过来了。
+- **04** 反着来：一个**没有优化空间**的算子（贴着天花板），
+  看清 divergence 谣言、in-place 的真实收益、以及为什么
+  elementwise 算子的性能故事全在融合里、不在 kernel 写法里。
 
 ---
 
 ## 2. 快速开始
 
 ```bash
-cd 01_vector_add    # 或 02_reduction / 03_matmul
+cd 01_vector_add    # 或 02_reduction / 03_matmul / 04_relu
 make                # 编译
 make run            # 跑全部对比和扫描
 make quick          # 只跑正确性 + 主对比（快）
@@ -65,8 +69,8 @@ make sanitize   # compute-sanitizer memcheck，查越界
 make racecheck  # compute-sanitizer racecheck，查漏掉的 __syncthreads()（02 / 03）
 ```
 
-`01_vector_add` 没有 `racecheck` 目标 —— 它根本不用 shared memory，
-没有可竞争的东西。
+`01_vector_add` 和 `04_relu` 没有 `racecheck` 目标 —— 它们根本不用
+shared memory，没有可竞争的东西。
 
 > `make sass` 是这套练习里最有用的一个目标。**"我加的这个优化，
 > 编译器是不是早就做了？"** 这个问题只有反汇编能回答 ——
@@ -155,6 +159,7 @@ fp32 累加 K 次，随机符号下误差按 `sqrt(K)` 增长。固定 `1e-5`
 | 01 | **向量化（float4）在常规 block 下毫无收益** —— v0/v1/v2 差距在 ±1% 噪声内。它真正的价值在小 block 下（block=32 时 2.6x）。 |
 | 02 | **结构上的浪费比微观的访存冲突值钱得多**：修 bank conflict 只有 1.29x，而"少开一半 block"有 1.86x。 |
 | 03 | **占用率和性能是反着的**：v0/v1 占用率 100%，v2/v3 只有 25% —— 快的是后者。compute-bound kernel 靠 ILP，不靠 TLP。 |
+| 04 | **手写 if/else 一点也不慢**（"一半正一半负会 divergence"是谣言：编译器用 FMNMX/谓词化把分支消了）；in-place 省占用不省流量；真正的优化是融合（1.70x），不在 kernel 写法里。 |
 
 第三条尤其值得注意，因为它**推翻了前两个练习建立的直觉**。
 "occupancy 要拉满"是个有前提的建议，前提是 memory-bound。
