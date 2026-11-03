@@ -21,3 +21,6 @@ __pycache__/
 
 # Triton JIT 缓存（万一 TRITON_CACHE_DIR 被指到仓库里）
 .triton/
+
+# cuda/lesson_CUDA-code: 第三方课程代码，排除其编译产物 / 编辑器配置 / Windows 下载残留
+cuda/lesson_CUDA-code/**/*.vscode/
