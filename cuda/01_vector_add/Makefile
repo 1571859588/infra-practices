@@ -12,7 +12,8 @@
 include ../common.mk
 
 TARGET  := bench
-SRCS    := bench.cu v0_naive.cu v1_vec4.cu v2_grid_stride.cu v3_strided_bad.cu
+SRCS    := bench.cu v0_naive.cu v1_vec4.cu v2_grid_stride.cu v3_strided_bad.cu \
+           v4_vec4_grid.cu
 OBJS    := $(SRCS:.cu=.o)
 
 all: $(TARGET)
@@ -31,14 +32,14 @@ quick: $(TARGET)
 
 # 看向量化有没有生效：v1 的 PTX 里应该出现 ld.global.v4.f32
 ptx:
-	@for f in v0_naive v1_vec4 v2_grid_stride v3_strided_bad; do \
+	@for f in v0_naive v1_vec4 v2_grid_stride v3_strided_bad v4_vec4_grid; do \
 		$(NVCC) $(NVCCFLAGS) -ptx -o $$f.ptx $$f.cu; \
 		echo "=== $$f.ptx 里的全局访存指令 ==="; \
 		grep -oE '(ld|st)\.global[a-z0-9.]*' $$f.ptx | sort | uniq -c; \
 	done
 
 sass: $(TARGET)
-	@for f in v0_naive v1_vec4 v2_grid_stride v3_strided_bad; do \
+	@for f in v0_naive v1_vec4 v2_grid_stride v3_strided_bad v4_vec4_grid; do \
 		$(NVCC) $(NVCCFLAGS) -cubin -o $$f.cubin $$f.cu; \
 		echo "=== $$f SASS 里的访存指令 ==="; \
 		$(CUOBJDUMP) -sass $$f.cubin | grep -oE '(LDG|STG)[A-Z0-9.]*' \
@@ -47,7 +48,7 @@ sass: $(TARGET)
 
 # 寄存器 / shared memory 用量 —— 决定 occupancy
 regs:
-	@for f in v0_naive v1_vec4 v2_grid_stride v3_strided_bad; do \
+	@for f in v0_naive v1_vec4 v2_grid_stride v3_strided_bad v4_vec4_grid; do \
 		echo "=== $$f ==="; \
 		$(NVCC) $(NVCCFLAGS) -Xptxas -v -c -o /dev/null $$f.cu 2>&1 \
 			| grep -E 'registers|smem' ; \

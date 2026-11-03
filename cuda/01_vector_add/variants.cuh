@@ -15,6 +15,9 @@ void launch_v1_vec4(const float* x, const float* y, float* out, int n,
                     int block);
 void launch_v2_grid_stride(const float* x, const float* y, float* out, int n,
                            int block, int grid);
+// v4 = v1 + v2：按 float4 步进的 grid-stride loop（§6 练习 4 的答案）
+void launch_v4_vec4_grid(const float* x, const float* y, float* out, int n,
+                         int block, int grid);
 // v3 多一个 per_thread：每个线程负责多少个**连续**元素。
 // 它同时就是 warp 内相邻线程的地址间距（× 4 字节）。
 // 传 0 用默认值 64。扫描这个参数能看出合并访存到底在哪一步失效。

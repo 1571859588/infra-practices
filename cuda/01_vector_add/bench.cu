@@ -28,11 +28,15 @@ static void v2_wrap(const float* x, const float* y, float* o, int n, int b) {
 static void v3_wrap(const float* x, const float* y, float* o, int n, int b) {
     launch_v3_strided_bad(x, y, o, n, b, 0);   // per_thread 默认 64
 }
+static void v4_wrap(const float* x, const float* y, float* o, int n, int b) {
+    launch_v4_vec4_grid(x, y, o, n, b, 0);     // grid 默认 4/SM
+}
 
 static const Variant VARIANTS[] = {
     {"v0 朴素（合并访存）", launch_v0_naive},
     {"v1 float4 向量化", launch_v1_vec4},
     {"v2 grid-stride", v2_wrap},
+    {"v4 float4+grid-stride", v4_wrap},
     {"v3 未合并（反面教材）", v3_wrap},
 };
 static const int NV = sizeof(VARIANTS) / sizeof(VARIANTS[0]);
@@ -139,6 +143,13 @@ static void sweep_grid_stride() {
         snprintf(label, sizeof(label), "grid=%d (%d/SM)", grid, per_sm);
         float ms = bench([&] {
             launch_v2_grid_stride(buf.dx, buf.dy, buf.dout, N_BENCH, 256, grid);
+        });
+        report_bw(label, ms, bytes);
+
+        // v4 = 同一个 grid 下按 float4 步进 —— §6 练习 4 的答案
+        snprintf(label, sizeof(label), "v4 grid=%d (%d/SM)", grid, per_sm);
+        ms = bench([&] {
+            launch_v4_vec4_grid(buf.dx, buf.dy, buf.dout, N_BENCH, 256, grid);
         });
         report_bw(label, ms, bytes);
     }
