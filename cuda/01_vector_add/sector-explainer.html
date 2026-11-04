@@ -1,0 +1,562 @@
+<title>为什么 v3 慢了 6 倍</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+/* 布局概念:单栏技术文档,760px 正文栏;IBM Plex Mono 承担代码/数据/标签,
+   正文用系统 CJK 字族;纸白底 + 墨绿正文 + NVIDIA 绿(命中/正确)+ 赭红(浪费/串行)。 */
+:root{
+  --bg:#FBFBF7; --surface:#F1F3EA; --surface-2:#E9EDDE;
+  --ink:#20291B; --muted:#66705E; --line:#DCE0D0;
+  --hit:#76B900; --hit-ink:#15230A;
+  --waste:#E3E6DA; --waste-line:#C6CCB8;
+  --accent:#4E7C08; --bad:#B3401F;
+  --code-bg:#EFF2E7;
+  --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --bg:#10140E; --surface:#181E13; --surface-2:#1F2618;
+    --ink:#E8EBDF; --muted:#A2AC96; --line:#2B3323;
+    --hit:#76B900; --hit-ink:#15230A;
+    --waste:#222A1B; --waste-line:#3B462C;
+    --accent:#9BCE33; --bad:#E5764F;
+    --code-bg:#161C10;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#10140E; --surface:#181E13; --surface-2:#1F2618;
+  --ink:#E8EBDF; --muted:#A2AC96; --line:#2B3323;
+  --hit:#76B900; --hit-ink:#15230A;
+  --waste:#222A1B; --waste-line:#3B462C;
+  --accent:#9BCE33; --bad:#E5764F;
+  --code-bg:#161C10;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--bg); color:var(--ink);
+  font:16px/1.75 -apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Noto Sans CJK SC","Microsoft YaHei",sans-serif;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+}
+.wrap{max-width:760px;margin-inline:auto}
+.band{background:var(--surface)}
+.band .wrap{padding-block:56px 48px}
+section{padding-block:48px}
+h1{font-size:clamp(30px,6vw,44px);line-height:1.22;margin:14px 0 18px;text-wrap:balance;font-weight:700;letter-spacing:.01em}
+h2{font-size:24px;line-height:1.35;margin:0 0 14px;text-wrap:balance;font-weight:700}
+h3{font-size:17px;margin:26px 0 8px;font-weight:600}
+p{margin:0 0 14px}
+.eyebrow{font-family:var(--mono);font-size:12px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:var(--accent)}
+.deck{font-size:17px;color:var(--muted);max-width:60ch;text-wrap:pretty}
+.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+code{font-family:var(--mono);font-size:.88em;background:var(--code-bg);border:1px solid var(--line);padding:1px 5px;border-radius:3px}
+pre.code{
+  font-family:var(--mono);font-size:13px;line-height:1.7;background:var(--code-bg);
+  border:1px solid var(--line);padding:14px 16px;overflow-x:auto;border-radius:4px;margin:0 0 10px;
+}
+pre.code b{color:var(--accent);font-weight:600}
+pre.code i{color:var(--muted);font-style:normal}
+figure{margin:26px 0}
+figure svg{max-width:100%;height:auto;display:block}
+figcaption{font-size:13.5px;color:var(--muted);margin-top:10px;line-height:1.6;max-width:64ch}
+svg text{font-family:var(--mono);fill:currentColor}
+.svgink{color:var(--ink)} .svmut{color:var(--muted)} .svacc{color:var(--accent)} .svbad{color:var(--bad)}
+.cmp{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media (max-width:640px){.cmp{grid-template-columns:1fr}}
+.cmp article{background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:16px;min-width:0}
+.cmp h4{margin:0 0 4px;font-size:14.5px}
+.cmp .tagline{font-family:var(--mono);font-size:12px;color:var(--muted);margin-bottom:12px}
+.strip{display:flex;gap:2px;margin:10px 0 6px}
+.strip .cell{flex:1 1 0;height:34px;border:1px solid var(--waste-line);position:relative;background:var(--waste);min-width:0}
+.strip .cell.full{background:var(--hit);border-color:var(--hit)}
+.strip .cell .sliver{position:absolute;top:0;bottom:0;left:0;width:12.5%;background:var(--hit)}
+.legend{display:flex;flex-wrap:wrap;gap:14px;font-family:var(--mono);font-size:11.5px;color:var(--muted);margin-top:2px}
+.legend .k{display:inline-block;width:11px;height:11px;border-radius:2px;margin-right:5px;vertical-align:-1px;border:1px solid var(--waste-line);background:var(--waste)}
+.legend .k.on{background:var(--hit);border-color:var(--hit)}
+.verdict{font-family:var(--mono);font-size:12.5px;margin-top:10px;color:var(--muted)}
+.verdict b{color:var(--ink)}
+.cards{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:20px}
+@media (max-width:640px){.cards{grid-template-columns:1fr}}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:16px 18px;min-width:0}
+.card h4{margin:0 0 6px;font-size:14.5px}
+.card p{font-size:14px;margin:0;color:var(--muted)}
+.card .big{font-family:var(--mono);font-size:22px;font-weight:600;color:var(--accent);margin:2px 0 6px;font-variant-numeric:tabular-nums}
+.card.bad .big{color:var(--bad)}
+.tldr{background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--hit);border-radius:6px;padding:18px 22px;margin-top:8px}
+.tldr ol{margin:8px 0 0;padding-left:22px}
+.tldr li{margin-bottom:8px}
+table{border-collapse:collapse;width:100%;font-size:14px;margin-top:6px}
+th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-family:var(--mono);font-size:11.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:600}
+td{color:var(--ink)}
+td .mono{font-size:12.5px}
+.scrollwrap{overflow-x:auto;margin:16px 0 6px;padding-bottom:6px}
+.play{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:20px;margin-top:24px}
+.play .ctl{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-bottom:6px}
+.play input[type=range]{flex:1 1 220px;accent-color:var(--accent);min-width:0}
+.play .readout{font-family:var(--mono);font-size:14px;white-space:nowrap}
+.play .readout b{color:var(--accent)}
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0 4px}
+.chip{font-family:var(--mono);font-size:12px;border:1px solid var(--line);background:var(--bg);color:var(--muted);padding:4px 10px;border-radius:99px;cursor:pointer}
+.chip:hover{border-color:var(--accent);color:var(--ink)}
+.chip.on{background:var(--hit);border-color:var(--hit);color:var(--hit-ink);font-weight:600}
+.lanemap{display:flex;gap:2px;min-width:max-content}
+.lanemap .cell{width:19px;height:38px;border:1px solid var(--waste-line);background:var(--waste);position:relative;flex:none}
+.lanemap .cell.hitc{background:var(--surface-2);border-color:var(--hit)}
+.lanemap .cell .sliver{position:absolute;top:0;bottom:0;background:var(--hit)}
+.lanemap .cell .lidx{position:absolute;top:100%;left:50%;transform:translateX(-50%);font-family:var(--mono);font-size:9.5px;color:var(--muted);white-space:nowrap;padding-top:3px}
+.lanemapwrap{overflow-x:auto;padding-bottom:34px;margin-top:14px}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:8px}
+@media (max-width:640px){.stats{grid-template-columns:repeat(2,1fr)}}
+.stat{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:10px 12px;min-width:0}
+.stat .v{font-family:var(--mono);font-size:20px;font-weight:600;font-variant-numeric:tabular-nums;color:var(--accent)}
+.stat .v.warn{color:var(--bad)}
+.stat .l{font-family:var(--mono);font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin-top:2px}
+.baseline{font-family:var(--mono);font-size:12px;color:var(--muted);margin-top:12px}
+.baseline b{color:var(--ink)}
+.footnote{font-size:13px;color:var(--muted);border-top:1px solid var(--line);padding-block:20px 34px;margin-top:56px}
+hr.sep{border:0;border-top:1px solid var(--line);margin:0}
+a{color:var(--accent)}
+</style>
+
+<div class="band">
+  <div class="wrap">
+    <div class="eyebrow">CUDA · 01_vector_add · v3 剖析</div>
+    <h1>为什么 v3 慢了 6 倍</h1>
+    <p class="deck">同样的向量加法,同样的数据量,只因为「哪个线程取哪 4 个字节」不一样,带宽从 84.8% 掉到 13.8%。这一页把背后的 L1/L2、sector、合并访存一次讲清——不需要任何 GPU 基础。</p>
+    <figure style="margin-bottom:0">
+      <div>
+        <div style="font-family:var(--mono);font-size:12px;color:var(--muted);margin-bottom:4px">v0 · 相邻线程取相邻地址</div>
+        <div class="strip" aria-hidden="true"><div class="cell full"></div><div class="cell full"></div><div class="cell full"></div><div class="cell full"></div></div>
+        <div class="verdict">一条 load 碰 <b>4 个 sector</b>,128 B 全部用上 → 实测 <b>84.8%</b></div>
+      </div>
+      <div style="margin-top:18px">
+        <div style="font-family:var(--mono);font-size:12px;color:var(--muted);margin-bottom:4px">v3 · 每个线程包一段(间距 128 B)</div>
+        <div class="strip" aria-hidden="true">
+          <div class="cell"><div class="sliver"></div></div><div class="cell"><div class="sliver"></div></div><div class="cell"><div class="sliver"></div></div><div class="cell"><div class="sliver"></div></div><div class="cell"><div class="sliver"></div></div><div class="cell"><div class="sliver"></div></div><div class="cell"><div class="sliver"></div></div><div class="cell"><div class="sliver"></div></div><div class="cell"><div class="sliver"></div></div><div class="cell"><div class="sliver"></div></div><div class="cell"><div class="sliver"></div></div><div class="cell"><div class="sliver"></div></div><div class="cell"><div class="sliver"></div></div><div class="cell"><div class="sliver"></div></div><div class="cell"><div class="sliver"></div></div><div class="cell"><div class="sliver"></div></div><div class="cell"><div class="sliver"></div></div>
+        </div>
+        <div class="verdict">一条 load 碰 <b>32 个 sector</b>,每个只用 4 B → 实测 <b>13.8%</b></div>
+      </div>
+      <figcaption>上:每格是一个 32 B 的 sector,绿色是这条 load 真正用到的字节。下:v3 里 32 个线程各自包一段,第一条 load 指令让每个线程落在自己的 sector 里(示意前 16 个)。</figcaption>
+    </figure>
+  </div>
+</div>
+
+<div class="wrap">
+
+<section id="s1">
+  <div class="eyebrow">01 · 三十秒的 GPU 常识</div>
+  <h2>GPU 不是 32 个独立的 CPU 线程</h2>
+  <p>GPU 的线程以 <b>warp</b> 为单位执行:32 个线程一组,永远在同一时刻执行<b>同一条指令</b>。当 warp 执行到一条取数指令时,是 32 个线程一起发,每人带着一个自己的地址——这 32 个地址可能挨在一起,也可能完全散开。</p>
+  <figure>
+    <svg viewBox="0 0 720 240" role="img" aria-label="一条 load 指令由 warp 的 32 个线程同时执行,每个线程带一个地址">
+      <g class="svgink">
+        <rect x="215" y="8" width="290" height="34" fill="none" stroke="currentColor" stroke-width="1.5"/>
+        <text x="360" y="30" text-anchor="middle" font-size="14" font-weight="600">ld.global.f32(取一个 float)</text>
+        <line x1="360" y1="42" x2="360" y2="58" stroke="currentColor" stroke-width="1.5"/>
+        <line x1="62" y1="58" x2="598" y2="58" stroke="currentColor" stroke-width="1.5"/>
+        <g fill="none" stroke="currentColor" stroke-width="1.5">
+          <line x1="62" y1="58" x2="62" y2="72"/><line x1="138" y1="58" x2="138" y2="72"/><line x1="214" y1="58" x2="214" y2="72"/><line x1="290" y1="58" x2="290" y2="72"/><line x1="366" y1="58" x2="366" y2="72"/><line x1="442" y1="58" x2="442" y2="72"/><line x1="518" y1="58" x2="518" y2="72"/><line x1="594" y1="58" x2="594" y2="72"/>
+        </g>
+        <g>
+          <rect x="30" y="72" width="64" height="56" fill="var(--surface)" stroke="currentColor" stroke-width="1.5"/>
+          <rect x="106" y="72" width="64" height="56" fill="var(--surface)" stroke="currentColor" stroke-width="1.5"/>
+          <rect x="182" y="72" width="64" height="56" fill="var(--surface)" stroke="currentColor" stroke-width="1.5"/>
+          <rect x="258" y="72" width="64" height="56" fill="var(--surface)" stroke="currentColor" stroke-width="1.5"/>
+          <rect x="334" y="72" width="64" height="56" fill="var(--surface)" stroke="currentColor" stroke-width="1.5"/>
+          <rect x="410" y="72" width="64" height="56" fill="var(--surface)" stroke="currentColor" stroke-width="1.5"/>
+          <rect x="486" y="72" width="64" height="56" fill="var(--surface)" stroke="currentColor" stroke-width="1.5"/>
+          <rect x="562" y="72" width="64" height="56" fill="var(--surface)" stroke="currentColor" stroke-width="1.5"/>
+        </g>
+        <g font-size="11" text-anchor="middle">
+          <text x="62" y="92">lane 0</text><text x="138" y="92">lane 1</text><text x="214" y="92">lane 2</text><text x="290" y="92">lane 3</text><text x="366" y="92">lane 4</text><text x="442" y="92">lane 5</text><text x="518" y="92">lane 6</text><text x="594" y="92" class="svmut">lane …31</text>
+        </g>
+        <g font-size="12" text-anchor="middle" class="svacc" font-weight="600">
+          <text x="62" y="114">addr 0</text><text x="138" y="114">addr 1</text><text x="214" y="114">addr 2</text><text x="290" y="114">addr 3</text><text x="366" y="114">addr 4</text><text x="442" y="114">addr 5</text><text x="518" y="114">addr 6</text><text x="594" y="114">addr 31</text>
+        </g>
+        <text x="62" y="160" font-size="11.5" class="svmut">(示意 8 个 lane;实际 warp 有 32 个)</text>
+        <line x1="30" y1="178" x2="626" y2="178" stroke="currentColor" stroke-width="1.5"/>
+        <path d="M626 173 l10 5 -10 5 z" fill="currentColor"/>
+        <text x="328" y="206" text-anchor="middle" font-size="13" class="svgink">这 32 个地址被<b>一起</b>打包,交给 SM 里的访存单元去合并</text>
+        <text x="328" y="226" text-anchor="middle" font-size="11.5" class="svmut">合并的单位,就是下一节的 32 字节 sector</text>
+      </g>
+    </svg>
+    <figcaption>warp 是 GPU 执行的最小单位:一条指令、32 个地址,同生共死。GPU 的「局部性」看的是这 32 个地址挨不挨在一起,而不是单个线程前后访问的数据。</figcaption>
+  </figure>
+  <p>CPU 程序员的直觉是「每个核分一段连续数据,cache 局部性好」——对 CPU 成立,因为 CPU 的局部性看<b>单个线程前后相邻</b>的访问。GPU 要的恰恰相反:<b>数据要在线程之间交错</b>,因为它的局部性看 warp 的横截面。v3 的错误用一句话概括就是:让线程内连续、warp 内散开。</p>
+</section>
+
+<hr class="sep">
+
+<section id="s2">
+  <div class="eyebrow">02 · 数据住在哪里</div>
+  <h2>L1 在 SM 里,L2 全芯片共享,global memory 就是 DRAM</h2>
+  <p>先破除一个神秘感:global memory 不是什么特殊的缓存,它就是显卡上的 DRAM(HBM 显存)。一次访存的路径是固定的——先查离得最近的 L1,查不到(miss)查 L2,再 miss 就去 DRAM,每一层 miss 都更贵:</p>
+  <figure>
+    <svg viewBox="0 0 720 400" role="img" aria-label="存储层次:SM 内的寄存器和 L1,L2 全芯片共享,DRAM 是 global memory 的物理位置;每次下层访问更慢">
+      <g class="svgink">
+        <rect x="30" y="16" width="380" height="118" fill="var(--surface)" stroke="currentColor" stroke-width="1.5"/>
+        <text x="48" y="42" font-size="14" font-weight="600">SM(流式多核,一颗 A100 有 108 个)</text>
+        <rect x="48" y="56" width="150" height="62" fill="var(--bg)" stroke="currentColor" stroke-width="1.5"/>
+        <text x="123" y="82" text-anchor="middle" font-size="12.5">寄存器</text>
+        <text x="123" y="100" text-anchor="middle" font-size="11" class="svmut">~1 周期</text>
+        <rect x="218" y="56" width="174" height="62" fill="var(--bg)" stroke="currentColor" stroke-width="1.5"/>
+        <text x="305" y="76" text-anchor="middle" font-size="12.5" font-weight="600">L1 / 共享内存</text>
+        <text x="305" y="94" text-anchor="middle" font-size="11" class="svmut">192 KB · 约 30 周期</text>
+        <text x="305" y="110" text-anchor="middle" font-size="10.5" class="svmut">同一块 SRAM,按需切分</text>
+        <g stroke="currentColor" stroke-width="1.5" fill="none">
+          <line x1="220" y1="134" x2="220" y2="168"/><path d="M215 162 l5 8 5 -8 z" fill="currentColor" stroke="none"/>
+        </g>
+        <text x="238" y="156" font-size="11" class="svbad">miss</text>
+        <rect x="30" y="176" width="380" height="62" fill="var(--surface)" stroke="currentColor" stroke-width="1.5"/>
+        <text x="48" y="200" font-size="13.5" font-weight="600">L2</text>
+        <text x="48" y="220" font-size="11" class="svmut">40 MB · 约 200 周期 · 所有 SM 共享一份</text>
+        <g stroke="currentColor" stroke-width="1.5" fill="none">
+          <line x1="220" y1="238" x2="220" y2="272"/><path d="M215 266 l5 8 5 -8 z" fill="currentColor" stroke="none"/>
+        </g>
+        <text x="238" y="260" font-size="11" class="svbad">miss</text>
+        <rect x="30" y="280" width="380" height="62" fill="var(--surface)" stroke="currentColor" stroke-width="1.5"/>
+        <text x="48" y="304" font-size="13.5" font-weight="600">DRAM(HBM 显存)</text>
+        <text x="48" y="324" font-size="11" class="svmut">80 GB · 约 450 周期 · 「global memory」物理上在这里</text>
+        <rect x="446" y="16" width="244" height="118" fill="none" stroke="currentColor" stroke-width="1.2" stroke-dasharray="5 4"/>
+        <text x="568" y="48" text-anchor="middle" font-size="12.5" class="svmut">其余 107 个 SM</text>
+        <text x="568" y="68" text-anchor="middle" font-size="11" class="svmut">每个都自带 L1</text>
+        <text x="568" y="84" text-anchor="middle" font-size="11" class="svmut">都要挤同一份 L2</text>
+        <line x1="568" y1="134" x2="568" y2="200" stroke="currentColor" stroke-width="1.2" stroke-dasharray="5 4"/>
+        <path d="M563 194 l5 8 5 -8 z" fill="currentColor" stroke="none"/>
+        <text x="460" y="356" font-size="11.5" class="svmut">容量与延迟为 A100(sm_80)量级,各代略有差异;</text>
+        <text x="460" y="374" font-size="11.5" class="svmut">层次结构对所有 CUDA GPU 成立。</text>
+      </g>
+    </svg>
+    <figcaption>一次 global memory 访问:查 L1 → miss 查 L2 → miss 去 DRAM。你要做的只有两件事——每次搬运别浪费,能命中上一层的尽量命中。</figcaption>
+  </figure>
+</section>
+
+<hr class="sep">
+
+<section id="s3">
+  <div class="eyebrow">03 · 最小包装</div>
+  <h2>sector:搬数据按 32 字节一箱收费</h2>
+  <p>关键设定来了。在 L1/L2 和 DRAM 之间,数据搬运的<b>最小单位是 32 字节,叫一个 sector</b>。哪怕线程只要 4 字节的一个 float,也是按一整个 32 B sector 搬的——像快递只发 32 B 的标准箱,寄一支笔也是一整箱的钱。</p>
+  <p>还要澄清一个容易误解的点:sector <b>不是「把相邻地址合并出来的块」</b>——硬件把整个地址空间<b>预先</b>切成了 32 B 对齐的固定格子:[0,32)、[32,64)、[64,96)……一个地址 <code>a</code> 永远属于第 <code>floor(a ÷ 32)</code> 号格子,生下来就定了。所谓「合并访存」,是访存单元拿 warp 的 32 个地址数一数落进了几个<b>不同</b>的格子(去重)——剩几个,这条 load 就要碰几个 sector。判断一个写法好不好,心算这一步就够了:</p>
+  <pre class="code"><i>// 间距 4 B:floor(0/32), floor(4/32), floor(8/32) … floor(124/32)</i>
+<i>//         = 0,0,0,0, 1,1,1,1, 2,2,2,2, 3,3,3,3 …  → 去重后只有 4 个格子 ✓</i>
+
+<i>// 间距 128 B:floor(128i/32) = 4i  → 0, 4, 8, 12 … 124</i>
+<i>//         → 32 个互不相同的格子,每 lane 独占一个 sector ✗</i></pre>
+  <p>另一个单位是 <b>cache line(128 B)</b>:L1/L2 里「记账」的单位——查 tag、判断命中、做替换都按整条 line 算。一条 line 正好装 4 个 sector:</p>
+  <figure>
+    <svg viewBox="0 0 720 205" role="img" aria-label="一条 128 字节 cache line 分成 4 个 32 字节 sector;一个 sector 内只用到 4 字节时,整箱 32 字节都要搬">
+      <g class="svgink">
+        <text x="24" y="24" font-size="12" class="svmut">cache line · 128 B(查 tag / 替换的单位)</text>
+        <rect x="24" y="32" width="672" height="52" fill="var(--surface)" stroke="currentColor" stroke-width="1.5"/>
+        <line x1="192" y1="32" x2="192" y2="84" stroke="currentColor" stroke-width="1"/>
+        <line x1="360" y1="32" x2="360" y2="84" stroke="currentColor" stroke-width="1"/>
+        <line x1="528" y1="32" x2="528" y2="84" stroke="currentColor" stroke-width="1"/>
+        <g font-size="12" text-anchor="middle">
+          <text x="108" y="62">sector · 32 B</text><text x="276" y="62">sector · 32 B</text><text x="444" y="62">sector · 32 B</text><text x="612" y="62">sector · 32 B</text>
+        </g>
+        <line x1="108" y1="84" x2="108" y2="118" stroke="currentColor" stroke-width="1" stroke-dasharray="4 3"/>
+        <text x="120" y="106" font-size="11" class="svmut">放大一个 sector →</text>
+        <rect x="140" y="122" width="440" height="46" fill="var(--surface)" stroke="currentColor" stroke-width="1.5"/>
+        <rect x="140" y="122" width="55" height="46" fill="var(--hit)" stroke="currentColor" stroke-width="1.5"/>
+        <g font-size="10.5" text-anchor="middle">
+          <text x="167" y="150" fill="var(--hit-ink)" font-weight="600">4 B 用到</text>
+          <text x="222" y="150" class="svmut">不用也搬</text><text x="277" y="150" class="svmut">不用也搬</text><text x="332" y="150" class="svmut">不用也搬</text><text x="387" y="150" class="svmut">不用也搬</text><text x="442" y="150" class="svmut">不用也搬</text><text x="497" y="150" class="svmut">不用也搬</text><text x="552" y="150" class="svmut">不用也搬</text>
+        </g>
+        <text x="600" y="150" font-size="11.5" class="svbad">← 28 B 浪费</text>
+        <text x="24" y="192" font-size="11.5" class="svmut">8 个 float 正好填满一个 sector;一行代码决定这 8 个 float 是 8 个线程同时用,还是 1 个线程分 8 次用。</text>
+      </g>
+    </svg>
+    <figcaption>sector 是「搬运」的单位,line 是「记账」的单位。所以「合并访存(coalescing)」的含义就是:让 warp 32 个线程的地址尽量落在少数几个 sector 里,并且把落进去的每个 sector 填满。</figcaption>
+  </figure>
+  <p>对 v0 来说,32 个线程取相邻的 32 个 float,正好 128 B,填满 4 个 sector,一次打包完事——这就是「完全合并」,搬运的字节没有一丁点浪费。</p>
+</section>
+
+<hr class="sep">
+
+<section id="s4">
+  <div class="eyebrow">04 · 对峙</div>
+  <h2>v0 和 v3 的第一条 load,差在哪</h2>
+  <p>把两种写法的<b>第一条取数指令</b>摊开看(每个线程取 <code>x[i]</code>,一个 4 字节 float):</p>
+  <pre class="code"><i>// v0:线程 i 取第 i 个 float —— 相邻线程,相邻地址</i>
+int i = blockIdx.x * blockDim.x + threadIdx.x;
+out[i] = x[i] + y[i];
+
+<i>// v3:线程 i 独占一段 —— 线程内连续,warp 内散开</i>
+int begin = tid * per_thread;          <i>// per_thread=32 时,线程间距 = 128 B</i>
+for (int i = begin; i &lt; begin + per_thread; ++i)
+    out[i] = x[i] + y[i];</pre>
+  <div class="cmp">
+    <article>
+      <h4>v0 · 间距 4 B</h4>
+      <div class="tagline">lane 0→0 B, lane 1→4 B, lane 2→8 B …</div>
+      <div class="strip" aria-hidden="true"><div class="cell full"></div><div class="cell full"></div><div class="cell full"></div><div class="cell full"></div></div>
+      <div class="legend"><span><span class="k on"></span>本次用到的字节</span><span><span class="k"></span>一起搬走的字节</span></div>
+      <div class="verdict">32 个地址 → <b>4 个 sector、1 条 line、1 个 wavefront</b><br>128 B 搬回来 128 B 全用上,<b>100%</b></div>
+    </article>
+    <article>
+      <h4>v3 · 间距 128 B</h4>
+      <div class="tagline">lane 0→0 B, lane 1→128 B, lane 2→256 B …</div>
+      <div class="strip" aria-hidden="true">
+        <div class="cell"><div class="sliver"></div></div><div class="cell"><div class="sliver"></div></div><div class="cell"><div class="sliver"></div></div><div class="cell"><div class="sliver"></div></div><div class="cell"><div class="sliver"></div></div><div class="cell"><div class="sliver"></div></div><div class="cell"><div class="sliver"></div></div><div class="cell"><div class="sliver"></div></div><div class="cell"><div class="sliver"></div></div><div class="cell"><div class="sliver"></div></div><div class="cell"><div class="sliver"></div></div><div class="cell"><div class="sliver"></div></div><div class="cell"><div class="sliver"></div></div><div class="cell"><div class="sliver"></div></div><div class="cell"><div class="sliver"></div></div><div class="cell"><div class="sliver"></div></div><div class="cell"><div class="sliver"></div></div>
+      </div>
+      <div class="legend"><span><span class="k on"></span>本次用到的字节</span><span><span class="k"></span>同一条 line 一起搬走的字节</span></div>
+      <div class="verdict">32 个地址 → <b>32 个 sector、32 条 line、约 32 个 wavefront</b><br>搬 1024 B 只为 128 B,<b>首触 12.5%</b></div>
+    </article>
+  </div>
+  <p style="margin-top:20px">散开要付两笔钱,你的实验把这两笔都踩到了:</p>
+  <div class="cards">
+    <div class="card bad">
+      <h4>惩罚一 · 带宽浪费</h4>
+      <div class="big">4 B / 32 B = 12.5%</div>
+      <p>若 sector 里其余 28 B 最终没人用,它就是白搬的。v3 的循环让每个线程最终会用完自己那段,所以前期 DRAM 总流量没爆炸——但代价见惩罚二。</p>
+    </div>
+    <div class="card bad">
+      <h4>惩罚二 · L1TEX 串行化</h4>
+      <div class="big">1 拍 → 32 拍</div>
+      <p>一条 load 要碰 S 个 sector、跨 L 条 line 时,访存单元把它拆成约 max(S/4, L) 个 wavefront,每周期只处理一个,排队串行。v0 是 1 拍,v3(间距 128 B)约 32 拍——指令把访存通道堵住了。</p>
+    </div>
+  </div>
+  <p style="margin-top:18px">惩罚二是 ncu 官方文档(Profiling Guide §3.3)的标准模型:指令 → request → 若干 sector → 若干 wavefront,「wavefront 是每周期能通过流水线的最大工作包,装不下的多个 wavefront 会被<b>串行</b>处理」。这也是为什么 v3 变慢的地方首先是访存吞吐,而不是显存容量或带宽本身。</p>
+</section>
+
+<hr class="sep">
+
+<section id="s5">
+  <div class="eyebrow">05 · 亲手扫一遍</div>
+  <h2>间距扫描器:拖一下,看地址落进哪些 sector</h2>
+  <p>下面模拟一条 load 指令:32 个线程(lane),相邻两个 lane 的地址相差「间距」。绿条是每个 lane 真正要的 4 B,浅色格是它所在的 sector。拖动滑杆,或点预设值(标注了你的实测):</p>
+  <div class="play">
+    <div class="ctl">
+      <label for="stride" class="mono" style="font-size:12px;color:var(--muted)">线程间距</label>
+      <input type="range" id="stride" min="4" max="256" step="4" value="128" aria-label="相邻线程的地址间距,字节">
+      <div class="readout">间距 = <b id="rdstride">128 B</b></div>
+    </div>
+    <div class="chips" id="chips"></div>
+    <div class="lanemapwrap">
+      <div class="lanemap" id="lanemap" aria-hidden="true"></div>
+    </div>
+    <div class="stats">
+      <div class="stat"><div class="v" id="stS">32</div><div class="l">碰到的 sector 数</div></div>
+      <div class="stat"><div class="v" id="stL">32</div><div class="l">跨到的 cache line 数</div></div>
+      <div class="stat"><div class="v warn" id="stW">32</div><div class="l">wavefront 估计(串行拍数)</div></div>
+      <div class="stat"><div class="v warn" id="stU">12.5%</div><div class="l">首触字节利用率</div></div>
+    </div>
+    <div class="baseline">对照 v0:<b>4 sector · 1 line · 1 wavefront · 100%</b>。图中只画前 8 个 lane;统计按 32 个 lane 计算。wavefront 按每周期约 4 个 sector、每包最多 1 条 line 估计(Volta 及之后,量级参考)。</div>
+  </div>
+</section>
+
+<hr class="sep">
+
+<section id="s6">
+  <div class="eyebrow">06 · 实测曲线</div>
+  <h2>为什么 32 B 才开始掉,而且是渐变</h2>
+  <p>把你的 bench 数字画出来(x 轴是线程间距,y 轴是实测带宽占峰值的比例):</p>
+  <figure>
+    <div id="chart"></div>
+    <figcaption>数据:你的 bench(sm_80)。虚线 12.5% = 每 32 B 只用 4 B 的带宽下限,复用完全失效时的纯浪费线。13.8% 几乎贴着它。</figcaption>
+  </figure>
+  <p>曲线分两段,对应两个「天花板」的交接:</p>
+  <p><b>前半段平(4–16 B):速度由 DRAM 带宽决定。</b>间距小于 32 B 时,相邻几个 lane 的地址落在<b>同一个</b> sector 里——第一轮 load 似乎也散,但这些 sector 里 28 B 的「浪费」马上会被同一个 warp 后续几轮循环用掉(命中 L1,不用再搬)。DRAM 该搬多少还是多少,速度不变。</p>
+  <p><b>间距正好 32 B:一个 lane 独占一个 sector,但仍然没白搬。</b>per_thread=8 时,lane 0 接下来 7 次迭代的地址是 4,8,…,28 B,全在 0 号 sector 里——第一条 load 已经把整箱 32 B 搬进了 L1,后面 7 次全是免费的 L1 命中,DRAM 流量和 v0 一模一样。所以首触利用率虽只有 12.5%,掉到 67.2% 的主因是<b>惩罚二</b>:之后每条 load 即使命中 L1,也照样要在访存单元里拆成 8 拍排完——这条指令永远占 8 拍而不是 1 拍。</p>
+  <p><b>后半段掉(≥ 64 B):L1 也兜不住了。</b>一个 warp 的工作集 = 32 × 间距字节,间距每翻一倍它跟着翻倍,和其他驻留 warp 挤在一起把 L1 撑爆,迭代之间开始 miss、复用失效——这时候每次搬运的 32 B 里只有 4 B 是立刻要用的,两笔惩罚一起上,速度一路滑向 8 倍慢的渐近线。13.8% 贴着 12.5% 的下限,说明复用已经几乎完全失效。</p>
+  <p>所以你 README 里那句「真正的失效点是 32 字节的 sector 而不是 128 字节的 line」完全正确:line 只管记账,sector 才管收费;间距跨过 32 B,收费方式就变了。</p>
+</section>
+
+<hr class="sep">
+
+<section id="s7">
+  <div class="eyebrow">07 · 落地</div>
+  <h2>怎么写才对,怎么自查</h2>
+  <h3>四条规则</h3>
+  <p><b>1. 相邻线程访问相邻地址。</b>最朴素也最有效:<code>i = tid</code> 而不是 <code>i = tid * P</code>。记住口诀——CPU 要「每核一段」,GPU 要「warp 内交错」。</p>
+  <p><b>2. 需要循环时,步长用整个 grid 的宽度。</b>这正是 v2 对的原因:</p>
+  <pre class="code"><i>// v2:grid-stride loop —— 步长是整个 grid,每轮循环内 warp 地址仍然连续</i>
+for (int i = tid; i &lt; n; i += <b>gridDim.x * blockDim.x</b>)
+    out[i] = x[i] + y[i];</pre>
+  <p>两个写法都有循环,区别在步长的层次:v3 步长是 1(线程内连续),v2 步长是整个 grid(回到 warp 内连续)。</p>
+  <p><b>3. 数据对齐。</b><code>cudaMalloc</code> 保证 256 B 对齐;结构体用 <code>alignas</code>;block 大小取 32 的倍数——不然第二个 block 起地址就错位,白白多碰 sector。</p>
+  <p><b>4. 一次多搬点。</b>连续布局 + 向量化访问(如 <code>float4</code>)让每个 lane 一条指令取 16 B,4 个 lane 正好填满一个 sector(这是 v1_vec4 的主题)。</p>
+  <h3>用 ncu 自查</h3>
+  <pre class="code"><i># 平均每条 load 请求碰几个 sector(v0 ≈ 4,散开 → 8/16/32)</i>
+ncu --metrics l1tex__average_t_sectors_per_request_pipe_lsu_mem_global_op_ld.ratio \
+    ./bench
+
+<i># 完整内存分析:L1/L2/DRAM 各级流量、命中率、sectors per request</i>
+ncu --section MemoryWorkloadAnalysis ./bench</pre>
+  <p>在 ncu 报告的 Memory Workload Analysis 里,「sectors per request」一栏 ≈ 4 是优秀,涨到 32 就是 v3 这种散法。nsys 看不到这些——它是时间线级工具(kernel 多长、拷贝有没有重叠),微架构的 sector 计数是 ncu 的地盘。</p>
+  <div class="tldr" style="margin-top:30px">
+    <div class="eyebrow" style="margin-bottom:2px">一分钟版本</div>
+    <ol>
+      <li>GPU 搬数据的最小包装是 <b>32 B 的 sector</b>,地址空间被预先切成 32 B 对齐的固定格子;warp 的 32 个地址落进几个<b>不同</b>的格子,这条 load 就要碰几个 sector。</li>
+      <li>相邻线程取相邻地址 → 4 个 sector 全填满;每个线程包一段 → 每 lane 独占 sector,一条 load 拆成几十个 wavefront <b>串行</b>,还把没人立刻用的字节一起搬走。</li>
+      <li>写循环让 warp 横截面上地址连续(grid-stride 的步长 = 整个 grid 的宽度),然后用 <code>ncu</code> 的 sectors/request 检查——≈4 收工。</li>
+    </ol>
+  </div>
+</section>
+
+<hr class="sep">
+
+<section id="s8" style="padding-block:36px">
+  <div class="eyebrow">08 · 延伸阅读</div>
+  <h2>想深入时,直接翻到这几页</h2>
+  <table>
+    <tr><th>文档</th><th>位置</th><th>内容</th></tr>
+    <tr><td>CUDA C++ Programming Guide(13.4)</td><td class="mono">p168–171</td><td>§8.3.2 Device Memory Accesses:32/64/128 B 事务、对齐规则、合并机制</td></tr>
+    <tr><td>同上</td><td class="mono">p32 起</td><td>Memory Hierarchy 层次总览</td></tr>
+    <tr><td>CUDA C++ Best Practices Guide</td><td class="mono">p41–45</td><td>§10.2.1 合并访存,含 strideCopy 实验(就是 v3 的官方版)</td></tr>
+    <tr><td>同上</td><td class="mono">p32–34</td><td>§9.2 理论/有效带宽计算(bench 的公式出处)</td></tr>
+    <tr><td>Nsight Compute Kernel Profiling Guide</td><td class="mono">p35–36</td><td>§3.3 Quantities:sector / wavefront 权威定义 + L1TEX 模型</td></tr>
+    <tr><td>Nsight Systems User Guide</td><td class="mono">—</td><td>不讲 sector;时间线级工具,微架构看 ncu</td></tr>
+  </table>
+  <div class="footnote">实测数字来自你的 bench(编译目标 sm_80,A100 级硬件);文中容量/延迟为 A100 量级;sector / wavefront 模型出自 ncu Kernel Profiling Guide §3.3,适用于 Volta 及之后所有架构。曲线形状的解释(两个天花板的交接)是量级模型,不是逐周期精确账。</div>
+</section>
+
+</div>
+
+<script>
+(function(){
+  "use strict";
+
+  /* ---------- 工具:给定间距,算 32 个 lane 落进哪些 sector / line ---------- */
+  function stats(stride){
+    var sec = {}, ln = {};
+    for(var i = 0; i < 32; i++){
+      sec[Math.floor(i * stride / 32)] = 1;
+      ln[Math.floor(i * stride / 128)] = 1;
+    }
+    var S = Object.keys(sec).length, L = Object.keys(ln).length;
+    return {
+      sectors: S,
+      lines: L,
+      wavefronts: Math.max(Math.ceil(S / 4), L),
+      util: 128 / (S * 32)   /* 32 lane × 4 B 有用字节 ÷ 实际触碰字节 */
+    };
+  }
+
+  /* ---------- 间距扫描器 ---------- */
+  var MEASURED = {4:84.3, 8:84.8, 16:84.3, 32:67.2, 64:35.9, 128:13.8};
+  var slider = document.getElementById("stride");
+  var chipsEl = document.getElementById("chips");
+  var mapEl = document.getElementById("lanemap");
+  var SHOW_LANES = 8;
+
+  Object.keys(MEASURED).forEach(function(s){
+    var b = document.createElement("button");
+    b.type = "button";
+    b.className = "chip";
+    b.dataset.stride = s;
+    b.textContent = s + " B · " + MEASURED[s] + "%";
+    b.addEventListener("click", function(){
+      slider.value = s;
+      render();
+    });
+    chipsEl.appendChild(b);
+  });
+
+  function render(){
+    var stride = parseInt(slider.value, 10);
+    document.getElementById("rdstride").textContent = stride + " B";
+    var st = stats(stride);
+
+    /* lane → sector 地图(只画前 8 个 lane,格子铺到它们最远的位置) */
+    var maxSec = Math.floor((SHOW_LANES - 1) * stride / 32);
+    var lanesIn = {};                       /* sector -> [lane...] */
+    var offIn = {};                         /* sector -> [byte 偏移...] */
+    for(var i = 0; i < SHOW_LANES; i++){
+      var a = i * stride, s = Math.floor(a / 32);
+      (lanesIn[s] = lanesIn[s] || []).push(i);
+      (offIn[s] = offIn[s] || []).push(a % 32);
+    }
+    var html = "";
+    for(var s = 0; s <= maxSec; s++){
+      if(lanesIn[s]){
+        var slivers = "";
+        for(var k = 0; k < offIn[s].length; k++){
+          slivers += '<div class="sliver" style="left:' + (offIn[s][k] / 32 * 100) + '%;width:' + (4 / 32 * 100) + '%"></div>';
+        }
+        var ls = lanesIn[s];
+        var lab = ls.length > 3 ? ("L" + ls[0] + "–L" + ls[ls.length - 1]) : ls.map(function(l){return "L" + l;}).join(",");
+        html += '<div class="cell hitc">' + slivers + '<div class="lidx">' + lab + '</div></div>';
+      } else {
+        html += '<div class="cell"></div>';
+      }
+    }
+    mapEl.innerHTML = html;
+
+    document.getElementById("stS").textContent = st.sectors;
+    document.getElementById("stL").textContent = st.lines;
+    var w = document.getElementById("stW"), u = document.getElementById("stU");
+    w.textContent = "≈ " + st.wavefronts;
+    u.textContent = (st.util * 100).toFixed(1) + "%";
+    w.className = "v" + (st.wavefronts > 4 ? " warn" : "");
+    u.className = "v" + (st.util < 0.999 ? " warn" : "");
+
+    Array.prototype.forEach.call(chipsEl.children, function(c){
+      c.classList.toggle("on", parseInt(c.dataset.stride, 10) === stride);
+    });
+  }
+  slider.addEventListener("input", render);
+  render();
+
+  /* ---------- 实测曲线(SVG) ---------- */
+  var DATA = [
+    {s:"4 B",  v:84.3}, {s:"8 B", v:84.8}, {s:"16 B", v:84.3},
+    {s:"32 B", v:67.2}, {s:"64 B", v:35.9}, {s:"128 B", v:13.8}
+  ];
+  var W = 720, H = 350, L = 56, R = 26, T = 34, B = 46;
+  var iw = W - L - R, ih = H - T - B;
+  function x(i){ return L + i * (iw / (DATA.length - 1)); }
+  function y(v){ return T + (1 - v / 100) * ih; }
+
+  var svgns = "http://www.w3.org/2000/svg";
+  var svg = document.createElementNS(svgns, "svg");
+  svg.setAttribute("viewBox", "0 0 " + W + " " + H);
+  svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", "线程间距与实测带宽曲线:4 到 16 字节约 84%,32 字节 67.2%,64 字节 35.9%,128 字节 13.8%,逼近 12.5% 虚线");
+
+  function el(name, attrs, text){
+    var e = document.createElementNS(svgns, name);
+    for(var k in attrs) e.setAttribute(k, attrs[k]);
+    if(text !== undefined) e.textContent = text;
+    return e;
+  }
+  /* 网格与 y 轴 */
+  [0,20,40,60,80,100].forEach(function(v){
+    svg.appendChild(el("line",{x1:L, y1:y(v), x2:W-R, y2:y(v),
+      stroke:"var(--line)","stroke-width":v===0?1.5:1}));
+    svg.appendChild(el("text",{x:L-8, y:y(v)+4, "text-anchor":"end","font-size":"11",
+      fill:"var(--muted)"},v+"%"));
+  });
+  /* 12.5% 下限虚线 */
+  svg.appendChild(el("line",{x1:L, y1:y(12.5), x2:W-R, y2:y(12.5),
+    stroke:"var(--bad)","stroke-width":1.2,"stroke-dasharray":"6 4"}));
+  svg.appendChild(el("text",{x:W-R, y:y(12.5)-6, "text-anchor":"end","font-size":"11",
+    fill:"var(--bad)"},["12.5% 下限(每 32 B 只用 4 B)"]));
+  /* x 轴标签 */
+  DATA.forEach(function(d, i){
+    svg.appendChild(el("text",{x:x(i), y:H-B+22, "text-anchor":"middle","font-size":"11.5",
+      fill:"var(--muted)"},d.s));
+  });
+  svg.appendChild(el("text",{x:L, y:H-B+38, "font-size":"10.5", fill:"var(--muted)"},["线程间距(相邻 lane 的地址差)"]));
+  /* 分段标注 */
+  svg.appendChild(el("text",{x:x(1), y:18, "text-anchor":"middle","font-size":"11.5",
+    fill:"var(--muted)"},["DRAM 带宽说了算"]));
+  svg.appendChild(el("text",{x:x(4), y:18, "text-anchor":"middle","font-size":"11.5",
+    fill:"var(--bad)"},["L1TEX 串行 + L1 兜不住"]));
+  /* 折线 */
+  var pts = DATA.map(function(d, i){ return x(i) + "," + y(d.v); }).join(" ");
+  svg.appendChild(el("polyline",{points:pts, fill:"none", stroke:"var(--hit)",
+    "stroke-width":2.5,"stroke-linejoin":"round"}));
+  DATA.forEach(function(d, i){
+    svg.appendChild(el("circle",{cx:x(i), cy:y(d.v), r:4.5, fill:"var(--hit)",
+      stroke:"var(--bg)","stroke-width":2}));
+    svg.appendChild(el("text",{x:x(i), y:y(d.v)-11, "text-anchor":"middle","font-size":"12",
+      "font-weight":"600", fill:"var(--ink)"},d.v + "%"));
+  });
+  document.getElementById("chart").appendChild(svg);
+})();
+</script>

@@ -158,6 +158,16 @@ NVIDIA 的 L1/L2 以 32 字节的 sector 为最小访存单位，一条 cache li
 落在这张表的 512 B 那一行附近（5.79×）—— **两个框架、两套代码，
 测到的是同一个硬件事实**。
 
+> **图解版**：这一节的全套机制（warp / L1·L2 / sector 固定格子 /
+> wavefront 串行 / 间距扫描）做成了交互式 HTML ——
+> **`sector-explainer.html`**，浏览器直接打开，零基础可读。
+> 里面有个可拖动的「间距扫描器」：实时显示 32 个 lane 的地址落进
+> 哪些 sector、估算 wavefront 数和首触利用率，和上面这张表逐行对应。
+> 它还把下跌的机制拆成了两笔账：**带宽浪费**（sector 内没人用的字节）
+> 和 **L1TEX 串行**（一条 load 拆成多个 wavefront 排队，ncu Profiling
+> Guide §3.3 的标准模型）——间距 32 B 那次下跌纯粹是后者，DRAM 一个
+> 字节都没白搬；到 128 B、工作集把 L1 挤爆之后，两笔一起上。
+
 ### 3.4 grid-stride：开多少 block 够用？float4 能救 grid=108 吗？
 
 ```
