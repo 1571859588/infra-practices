@@ -38,3 +38,6 @@ cuda/lesson_CUDA-code/3.1lesson/setDevice
 cuda/lesson_CUDA-code/3.2lesson/errorCheckFunction2
 cuda/lesson_CUDA-code/3.2lesson/errorCheckKernel2
 cuda/lesson_CUDA-code/3.3lesson/eventRecordTime2
+
+# vim 交换文件
+*.swp
