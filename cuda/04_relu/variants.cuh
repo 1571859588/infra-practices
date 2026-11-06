@@ -14,6 +14,9 @@ void launch_v0_naive(const float* x, float* out, int n, int block);
 // 用来验证「三元运算符 vs if 分支」在 SASS 里是不是同一条指令。
 void launch_v0_ifbranch(const float* x, float* out, int n, int block);
 void launch_v1_vec4(const float* x, float* out, int n, int block);
+// v2b：纯标量 grid-stride（不带 float4）—— 归因实验：
+// v2 那 6 个点的损失是循环本身的，还是 float4+循环组合的？
+void launch_v2_scalar_grid(const float* x, float* out, int n, int block, int grid);
 void launch_v2_vec4_grid(const float* x, float* out, int n, int block, int grid);
 
 // 融合演示（v3_fused.cu）：out = relu(x + y)。

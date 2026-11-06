@@ -22,6 +22,9 @@ struct Variant {
     void (*launch)(const float*, float*, int, int);
 };
 
+static void v2b_wrap(const float* x, float* o, int n, int b) {
+    launch_v2_scalar_grid(x, o, n, b, 0);
+}
 static void v2_wrap(const float* x, float* o, int n, int b) {
     launch_v2_vec4_grid(x, o, n, b, 0);
 }
@@ -30,6 +33,7 @@ static const Variant VARIANTS[] = {
     {"v0 朴素（三元）", launch_v0_naive},
     {"v0 手写 if/else 分支", launch_v0_ifbranch},
     {"v1 float4 向量化", launch_v1_vec4},
+    {"v2b grid-stride（标量）", v2b_wrap},
     {"v2 float4+grid-stride", v2_wrap},
 };
 static const int NV = sizeof(VARIANTS) / sizeof(VARIANTS[0]);
@@ -181,6 +185,34 @@ static void sweep_inplace_size() {
     printf("    但工作集减半，L2 的临界规模翻倍。见 README §3.3。\n");
 }
 
+// v2 的 6 个点去哪了：标量 grid-stride（v2b）vs float4 grid-stride（v2），
+// 扫 grid 大小。如果 v2b 贴着 v0（82.6%）→ 损失来自 float4+循环的组合；
+// 如果 v2b 掉到 v2 附近（78%）→ 损失来自循环本身。
+static void sweep_grid() {
+    printf("\n[扫描] grid 大小：标量 grid-stride vs float4 grid-stride\n");
+    printf("  （%d 个 SM；对照 v0=%.1f%%、v1=%.1f%%，见 §1 表）\n", num_sms(),
+           100.0 * 1285.0 / 1555.2, 100.0 * 1310.7 / 1555.2);
+    Buffers buf(N_BENCH);
+    double bytes = nbytes(N_BENCH);
+    for (int per_sm : {1, 2, 4, 8, 32}) {
+        int grid = num_sms() * per_sm;
+        char label[64];
+        snprintf(label, sizeof(label), "v2b grid=%d (%d/SM)", grid, per_sm);
+        float ms = bench([&] {
+            launch_v2_scalar_grid(buf.dx, buf.dout, N_BENCH, 256, grid);
+        });
+        report_bw(label, ms, bytes);
+
+        snprintf(label, sizeof(label), "v2  grid=%d (%d/SM)", grid, per_sm);
+        ms = bench([&] {
+            launch_v2_vec4_grid(buf.dx, buf.dout, N_BENCH, 256, grid);
+        });
+        report_bw(label, ms, bytes);
+    }
+    printf("  v0/v1 的 grid 是 %d（= n/256，由数据量决定）\n",
+           (N_BENCH + 255) / 256);
+}
+
 // 本练习真正的重点：单独的 ReLU 没有优化空间，但融合能让它的
 // 8 B/elem 访存整个消失 —— 变成别人 epilogue 里的一条 FMNMX。
 static void fusion_demo() {
@@ -232,6 +264,7 @@ int main(int argc, char** argv) {
     head_to_head();
     if (!quick) {
         sweep_sign();
+        sweep_grid();
         sweep_inplace_size();
         fusion_demo();
     }
