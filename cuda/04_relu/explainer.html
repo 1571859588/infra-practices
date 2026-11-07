@@ -1,0 +1,575 @@
+<title>在途请求与 in-place</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=Noto+Serif+SC:wght@600;900&display=swap">
+<style>
+/* ============ 设计令牌 ============
+   布局：单栏阅读页（max-width 46rem），图表全宽穿插；
+   色彩：工程蓝（在途/L2/快）× 锈橙（DRAM/等待/慢）；
+   字体：思源宋体做标题（教材感），思源黑体正文，Plex Mono 数据。 */
+:root {
+  --bg: #f5f6f8;
+  --surface: #ffffff;
+  --fg: #1a1d24;
+  --muted: #5b6472;
+  --line: #d8dde5;
+  --accent: #1e5fd0;
+  --accent-soft: #e3ecfd;
+  --warm: #b0540a;
+  --warm-soft: #fbeadb;
+  --good: #157a4c;
+  --good-soft: #e2f3ea;
+  --code-bg: #eceff4;
+  --mono: "IBM Plex Mono", ui-monospace, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1218; --surface: #171b23; --fg: #e8ebf2; --muted: #99a3b4;
+    --line: #2a3140; --accent: #7aa7ff; --accent-soft: #1c2a45;
+    --warm: #e6924f; --warm-soft: #3a2717; --good: #55c48f; --good-soft: #17301f;
+    --code-bg: #1c222d; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f1218; --surface: #171b23; --fg: #e8ebf2; --muted: #99a3b4;
+  --line: #2a3140; --accent: #7aa7ff; --accent-soft: #1c2a45;
+  --warm: #e6924f; --warm-soft: #3a2717; --good: #55c48f; --good-soft: #17301f;
+  --code-bg: #1c222d; color-scheme: dark;
+}
+body {
+  background: var(--bg); color: var(--fg);
+  font: 16px/1.75 "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+.page {
+  max-width: 46rem; margin: 0 auto;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 3.5rem 4rem;
+}
+h1, h2, h3 { font-family: "Noto Serif SC", "Songti SC", serif; text-wrap: balance; line-height: 1.3; }
+h1 { font-size: 2rem; font-weight: 900; margin: 0 0 .6rem; }
+h2 { font-size: 1.45rem; font-weight: 900; margin: 3.2rem 0 .2rem; padding-top: 1.6rem; border-top: 1px solid var(--line); }
+h3 { font-size: 1.08rem; font-weight: 700; margin: 1.9rem 0 .3rem; }
+p { margin: .7rem 0; }
+.lede { font-size: 1.05rem; color: var(--muted); margin: 0 0 1.6rem; }
+.eyebrow {
+  font-family: var(--mono); font-size: .72rem; letter-spacing: .18em;
+  text-transform: uppercase; color: var(--accent); margin-bottom: .5rem;
+}
+.q-card {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
+  padding: .95rem 1.2rem; margin: .6rem 0;
+}
+.q-card b { font-family: var(--mono); font-size: .85rem; color: var(--accent); }
+.num, td, .val { font-variant-numeric: tabular-nums; }
+code, .mono { font-family: var(--mono); font-size: .88em; }
+code { background: var(--code-bg); border-radius: 4px; padding: .1em .35em; }
+pre {
+  background: var(--code-bg); border-radius: 8px; padding: .9rem 1.1rem;
+  overflow-x: auto; font-family: var(--mono); font-size: .82rem; line-height: 1.65;
+  margin: 1rem 0;
+}
+figure { margin: 1.5rem 0; }
+figure svg { max-width: 100%; height: auto; display: block; }
+figcaption {
+  font-size: .82rem; color: var(--muted); margin-top: .5rem; line-height: 1.6;
+}
+figcaption b { color: var(--fg); }
+.stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: .7rem; margin: 1.4rem 0; }
+.stat {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
+  padding: .8rem .9rem; min-width: 0;
+}
+.stat .v { font-family: var(--mono); font-size: 1.15rem; font-weight: 600; }
+.stat .k { font-size: .76rem; color: var(--muted); line-height: 1.45; margin-top: .15rem; }
+.callout {
+  border-left: 3px solid var(--accent); background: var(--accent-soft);
+  border-radius: 0 8px 8px 0; padding: .8rem 1.1rem; margin: 1.2rem 0; font-size: .95rem;
+}
+.callout.warm { border-color: var(--warm); background: var(--warm-soft); }
+.formula {
+  background: var(--surface); border: 1px dashed var(--line); border-radius: 8px;
+  padding: .8rem 1.1rem; margin: 1.1rem 0; text-align: center;
+  font-family: var(--mono); font-size: .95rem; line-height: 2;
+}
+.formula small { color: var(--muted); font-family: "Noto Sans SC"; }
+table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: .88rem; }
+th, td { border: 1px solid var(--line); padding: .4rem .6rem; text-align: right; }
+th { background: var(--surface); font-weight: 600; }
+td:first-child, th:first-child { text-align: left; }
+tr.hl td { background: var(--accent-soft); }
+/* ---- 条形图（纯 CSS，响应式） ---- */
+.chart { margin: 1.3rem 0; }
+.chart .row { display: grid; grid-template-columns: 6.5rem 1fr; gap: .6rem; align-items: center; margin: .45rem 0; }
+.chart .lab { font-family: var(--mono); font-size: .8rem; color: var(--muted); text-align: right; }
+.chart .track { position: relative; }
+.chart .bar { height: 15px; border-radius: 3px; margin: 2px 0; min-width: 2px; position: relative; }
+.bar.out { background: var(--warm); opacity: .75; }
+.bar.in  { background: var(--accent); }
+.chart .bval { position: absolute; left: 100%; top: 50%; transform: translateY(-50%); font-family: var(--mono); font-size: .72rem; color: var(--muted); margin-left: .45rem; white-space: nowrap; }
+.chart .peakline { position: absolute; top: -4px; bottom: -4px; width: 2px; background: var(--fg); opacity: .4; }
+.legend { display: flex; gap: 1.4rem; font-size: .8rem; color: var(--muted); margin-top: .4rem; flex-wrap: wrap; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: .35em; vertical-align: -1px; }
+/* ---- 交互控件 ---- */
+.widget {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 12px;
+  padding: 1.1rem 1.2rem; margin: 1.3rem 0;
+}
+.widget .row { display: flex; gap: 1rem; flex-wrap: wrap; align-items: center; margin: .5rem 0; }
+.widget label { font-size: .88rem; }
+input[type=range] { flex: 1 1 12rem; min-width: 0; accent-color: var(--accent); }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.seg button {
+  background: transparent; color: var(--fg); border: 0; padding: .38rem .9rem;
+  font: .85rem/1.4 "Noto Sans SC"; cursor: pointer;
+}
+.seg button[aria-pressed=true] { background: var(--accent); color: #fff; }
+:root[data-theme=dark] .seg button[aria-pressed=true] { color: #0f1218; }
+.readout { display: grid; grid-template-columns: repeat(auto-fit, minmax(7.5rem, 1fr)); gap: .6rem; margin: .9rem 0; }
+.readout .cell { border: 1px solid var(--line); border-radius: 8px; padding: .5rem .7rem; min-width: 0; }
+.readout .cell .v { font-family: var(--mono); font-size: 1rem; font-weight: 600; }
+.readout .cell .k { font-size: .72rem; color: var(--muted); }
+.verdict { font-size: .95rem; margin-top: .6rem; }
+.verdict b.ok { color: var(--good); } .verdict b.bad { color: var(--warm); }
+.meter { position: relative; height: 26px; background: var(--code-bg); border-radius: 6px; margin-top: .8rem; overflow: hidden; }
+.meter .fill { height: 100%; background: var(--accent); opacity: .8; border-radius: 6px 0 0 6px; transition: width .25s; }
+.meter .need { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--fg); }
+.meter .need span { position: absolute; top: 3px; left: 5px; font-family: var(--mono); font-size: .66rem; color: var(--muted); white-space: nowrap; }
+.wsbox { position: relative; height: 34px; background: var(--code-bg); border-radius: 6px; margin-top: .8rem; }
+.wsbox .fill { height: 100%; background: var(--warm); opacity: .8; border-radius: 6px 0 0 6px; transition: width .25s; }
+.wsbox .l2 { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--fg); }
+.wsbox .l2 span { position: absolute; top: 3px; left: 5px; font-family: var(--mono); font-size: .66rem; color: var(--muted); }
+footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--line); font-size: .8rem; color: var(--muted); }
+a { color: var(--accent); }
+@media (max-width: 480px) {
+  .stats { grid-template-columns: 1fr; }
+  .chart .row { grid-template-columns: 4.6rem 1fr; }
+}
+</style>
+
+<main class="page">
+
+<p class="eyebrow">cuda / 04_relu · 图解笔记</p>
+<h1>在途请求与 in-place</h1>
+<p class="lede">README 里两个最容易看不懂的问题，换一种讲法：不背公式，先把画面建立起来。所有数字都来自 A100-SXM4-40GB 上的实测。</p>
+
+<div class="stats" role="list">
+  <div class="stat" role="listitem"><div class="v">1555.2 GB/s</div><div class="k">显存（DRAM）峰值带宽 —— 全部计算的分母</div></div>
+  <div class="stat" role="listitem"><div class="v">≈ 700 ns</div><div class="k">读一次显存的往返延迟 —— 约几百个时钟周期</div></div>
+  <div class="stat" role="listitem"><div class="v">40 MB</div><div class="k">L2 缓存容量，实测带宽 2340 GB/s（DRAM 的 1.5 倍）</div></div>
+</div>
+
+<div class="q-card"><b>问题一</b>　「在途请求数（MLP）」到底是什么、怎么算？→ <a href="#q1">图解</a></div>
+<div class="q-card"><b>问题二</b>　in-place / out-of-place 的代码在哪、差在哪？→ <a href="#q2">图解</a></div>
+
+<!-- ================================================================ -->
+<h2 id="q1">问题一：在途请求数（MLP）</h2>
+
+<h3>先接受一个反差：显存非常慢</h3>
+<p>GPU 做一次 <code>max(x, 0)</code> 大约只要 1 纳秒；但从显存把 <code>x</code> 取回来，一个来回要 <b class="num">≈ 700 ns</b>。
+比例大概是：砌一块砖 1 秒，去仓库搬这块砖要 12 分钟。如果每次都「搬一块 → 砌一块 → 再去搬下一块」，
+砌砖的手 99% 的时间都在闲着。</p>
+
+<figure>
+<svg viewBox="0 0 720 168" role="img" aria-label="单个线程的时间线：大部分时间在等显存数据回来，计算只占极短一段">
+  <text x="12" y="22" font-size="12.5" fill="currentColor">1 个线程的一生</text>
+  <line x1="12" y1="42" x2="708" y2="42" stroke="currentColor" stroke-width="1"/>
+  <rect x="12"  y="34" width="52" height="16" rx="3" fill="currentColor" opacity=".85"/>
+  <text x="16" y="46" font-size="10" fill="var(--surface)">发 load</text>
+  <rect x="66" y="34" width="470" height="16" rx="3" fill="none" stroke="var(--warm)" stroke-dasharray="4 4" stroke-width="1.4"/>
+  <text x="120" y="66" font-size="11" fill="var(--warm)">在等显存：约 700 ns（占这条命的 90%+）</text>
+  <rect x="540" y="34" width="26" height="16" rx="3" fill="var(--accent)"/>
+  <text x="540" y="46" font-size="9" fill="#fff">max</text>
+  <rect x="572" y="34" width="42" height="16" rx="3" fill="currentColor" opacity=".85"/>
+  <text x="574" y="46" font-size="9.5" fill="var(--surface)">写回</text>
+  <text x="12" y="100" font-size="12.5" fill="currentColor">很多线程错开跑（GPU 的解法）</text>
+  <g>
+    <rect x="12"  y="112" width="180" height="14" rx="3" fill="var(--warm)" opacity=".25"/>
+    <rect x="152" y="130" width="180" height="14" rx="3" fill="var(--warm)" opacity=".25"/>
+    <rect x="292" y="112" width="180" height="14" rx="3" fill="var(--warm)" opacity=".25"/>
+    <rect x="432" y="130" width="180" height="14" rx="3" fill="var(--warm)" opacity=".25"/>
+    <rect x="572" y="112" width="180" height="14" rx="3" fill="var(--warm)" opacity=".25"/>
+  </g>
+  <text x="12" y="164" font-size="11" fill="currentColor">每条色带 = 一个线程在等自己的数据。只要同时在等的线程足够多，总线就始终有活干</text>
+</svg>
+<figcaption><b>GPU 靠「很多人同时在等」来掩盖延迟</b>：一个线程等的时候，执行单元去跑别的线程。等的人越多，硬件越闲不下来。</figcaption>
+</figure>
+
+<h3>带宽是「吞吐」，不是「单程速度」</h3>
+<p>1555.2 GB/s 的意思不是「数据 700 ns 能到」，而是「这条总线**每个时刻**都在过这么多货」。
+就像高速公路：车道吞吐量 × 单程耗时 = 必须常驻在路上的货车总量。
+想跑满带宽，<b>路上必须一直有足够多的货</b> —— 这就是「在途请求数」。</p>
+
+<figure>
+<svg viewBox="0 0 720 110" role="img" aria-label="SM 与显存之间的一条总线，管道内常驻约 1.1 MB 数据">
+  <rect x="8" y="34" width="86" height="42" rx="6" fill="none" stroke="currentColor" stroke-width="1.3"/>
+  <text x="51" y="52" font-size="12" text-anchor="middle" fill="currentColor">SM</text>
+  <text x="51" y="68" font-size="9.5" text-anchor="middle" fill="var(--muted)">计算单元</text>
+  <line x1="94" y1="55" x2="612" y2="55" stroke="currentColor" stroke-width="1.3"/>
+  <g>
+    <rect x="104" y="45" width="34" height="20" rx="3" fill="var(--accent)"/>
+    <rect x="168" y="45" width="34" height="20" rx="3" fill="var(--accent)" opacity=".85"/>
+    <rect x="232" y="45" width="34" height="20" rx="3" fill="var(--accent)" opacity=".7"/>
+    <rect x="296" y="45" width="34" height="20" rx="3" fill="var(--accent)" opacity=".85"/>
+    <rect x="360" y="45" width="34" height="20" rx="3" fill="var(--accent)"/>
+    <rect x="424" y="45" width="34" height="20" rx="3" fill="var(--accent)" opacity=".7"/>
+    <rect x="488" y="45" width="34" height="20" rx="3" fill="var(--accent)" opacity=".85"/>
+    <rect x="552" y="45" width="34" height="20" rx="3" fill="var(--accent)"/>
+  </g>
+  <rect x="626" y="34" width="86" height="42" rx="6" fill="none" stroke="var(--warm)" stroke-width="1.3"/>
+  <text x="669" y="52" font-size="12" text-anchor="middle" fill="currentColor">显存</text>
+  <text x="669" y="68" font-size="9.5" text-anchor="middle" fill="var(--muted)">40 GB</text>
+  <path d="M 200 84 v 8 h 300 v -8" fill="none" stroke="currentColor" stroke-width="1"/>
+  <text x="350" y="102" font-size="11" text-anchor="middle" fill="currentColor">同一时刻整条路上常驻的货 ≈ 1555.2 GB/s × 700 ns ≈ 1.1 MB</text>
+</svg>
+<figcaption><b>Little 定律的工程版</b>：吞吐 × 延迟 = 必须在途的量。这 1.1 MB 就是所有账的基准线。</figcaption>
+</figure>
+
+<h3>开始算账：ReLU 每个线程能贡献多少「在途」</h3>
+<p>看 <code>v0_naive.cu</code> 的循环体：每个线程读 1 个 float（4 B）、写 1 个 float（4 B），
+所以满打满算一个线程身上<b>同时在飞的只有 8 B</b>。要凑够 1.1 MB：</p>
+
+<div class="formula">
+需要 ≈ 1.1 MB ÷ 8 B ≈ <b>14 万个线程同时在等</b><br>
+<small>A100：108 个 SM × 每 SM 最多驻留 2048 线程 = 22 万线程容量 → 勉强够 → 实测 v0 = 82.6%</small>
+</div>
+
+<p>三个会「饿死」总线的因素，正好对应三次实测翻车：</p>
+<p><b>① 驻留的线程不够多。</b>grid 开小了，或者 block 太小把「车位」浪费了 —— 每 SM 有 64 个 warp 车位，
+但最多只驻留 32 个 block：<code>block=32</code>（一个 block 才 1 个 warp）时车位只用一半，只有 11 万线程上线。</p>
+
+<figure>
+<svg viewBox="0 0 720 210" role="img" aria-label="三个 SM 车位图：grid=1/SM 时每 SM 只有 8 个 warp 车位被占，grid=4/SM 时 32 个，grid=32/SM 时 64 个全满">
+  <defs>
+    <pattern id="slots" width="11" height="11" patternUnits="userSpaceOnUse" patternTransform="translate(6,6)">
+      <rect x="0.5" y="0.5" width="10" height="10" rx="2" fill="none" stroke="var(--line)" stroke-width="1"/>
+    </pattern>
+  </defs>
+  <g transform="translate(0,0)">
+    <text x="10" y="16" font-size="11.5" fill="currentColor">grid = 108（每 SM 1 个 block）</text>
+    <g transform="translate(10,26)">
+      <rect x="0" y="0" width="96" height="96" rx="5" fill="none" stroke="currentColor" stroke-width="1.1"/>
+      <rect x="6" y="6" width="87" height="10" rx="2" fill="var(--accent)"/>
+      <rect x="0" y="0" width="96" height="96" rx="5" fill="url(#slots)"/>
+    </g>
+    <text x="58" y="146" font-size="11" text-anchor="middle" fill="currentColor">8 / 64 车位</text>
+    <text x="58" y="162" font-size="10.5" text-anchor="middle" fill="var(--warm)" font-weight="600">实测 61.5%</text>
+  </g>
+  <g transform="translate(152,0)">
+    <text x="10" y="16" font-size="11.5" fill="currentColor">grid = 432（每 SM 4 个）</text>
+    <g transform="translate(10,26)">
+      <rect x="0" y="0" width="96" height="96" rx="5" fill="none" stroke="currentColor" stroke-width="1.1"/>
+      <rect x="6" y="6" width="87" height="43" rx="2" fill="var(--accent)"/>
+      <rect x="0" y="0" width="96" height="96" rx="5" fill="url(#slots)"/>
+    </g>
+    <text x="58" y="146" font-size="11" text-anchor="middle" fill="currentColor">32 / 64 车位</text>
+    <text x="58" y="162" font-size="10.5" text-anchor="middle" fill="var(--warm)" font-weight="600">实测 78.8%</text>
+  </g>
+  <g transform="translate(304,0)">
+    <text x="10" y="16" font-size="11.5" fill="currentColor">grid = 3456（每 SM 32 个）</text>
+    <g transform="translate(10,26)">
+      <rect x="0" y="0" width="96" height="96" rx="5" fill="none" stroke="currentColor" stroke-width="1.1"/>
+      <rect x="6" y="6" width="87" height="87" rx="2" fill="var(--accent)"/>
+      <rect x="0" y="0" width="96" height="96" rx="5" fill="url(#slots)"/>
+    </g>
+    <text x="58" y="146" font-size="11" text-anchor="middle" fill="currentColor">64 / 64 车位</text>
+    <text x="58" y="162" font-size="10.5" text-anchor="middle" fill="var(--good)" font-weight="600">实测 81.8%</text>
+  </g>
+  <text x="452" y="16" font-size="11.5" fill="currentColor">每个格子 = 1 个 warp（32 线程）</text>
+  <text x="452" y="36" font-size="11" fill="var(--muted)">grid-stride 标量版（v2b）实测。</text>
+  <text x="452" y="56" font-size="11" fill="var(--muted)">空格子 = 空着的车位，</text>
+  <text x="452" y="76" font-size="11" fill="var(--muted)">= 没人帮你等显存。</text>
+  <text x="452" y="102" font-size="11" fill="var(--muted)">对照：不用循环的 v0/v1，</text>
+  <text x="452" y="122" font-size="11" fill="var(--muted)">grid=65536（数据量决定），</text>
+  <text x="452" y="142" font-size="11" fill="var(--muted)">天然全满：82.6% / 84.3%。</text>
+</svg>
+<figcaption><b>车位图就是 MLP 的具象</b>：空车位越多，「同时在等显存」的线程越少，总线越饿。grid 从 1/SM 开到 32/SM，就是把车位停满的过程。</figcaption>
+</figure>
+
+<p><b>② 每个线程发的字节太少。</b>这是 <code>float4</code> 的出场时机：同样的线程数，
+一次发 128 bit（16 B）而不是 32 bit（4 B），每线程在途 8 B → 32 B，直接 ×4。
+grid=108（8 个 warp）时标量版在途只有约 0.2 MB，float4 版约 0.86 MB —— 接近 1.1 MB 的需求，
+所以 61.5% 被拉到 <b>81.0%</b>。线程不够，就拿字节凑。</p>
+
+<p><b>③ 循环把「在途」掐成了一段一段。</b>grid-stride 版每线程要循环 38 轮，
+一轮的读写发完、还没回来之前，这个线程就干等。车位只停一半时（4/SM，32 个 warp），
+别的 warp 不够多、盖不住这个间隙，于是「量够了但断了流」—— 这就是 README §3.2 里
+v2b 和 v2 在 4/SM 都掉到 78.8% 的原因：掉的点数一样，说明是<b>循环本身</b>在漏气，
+跟 float4 没关系。</p>
+
+<div class="widget">
+  <div class="mono" style="font-size:.78rem;color:var(--muted)">动手算 · 把车位停到多少才够？</div>
+  <div class="row">
+    <label for="gridSlider">每 SM 的 block 数</label>
+    <input type="range" id="gridSlider" min="1" max="32" value="1">
+    <span class="mono" id="gridVal" style="min-width:3.5rem">1</span>
+  </div>
+  <div class="row">
+    <span class="seg" role="group" aria-label="每线程在途字节数">
+      <button type="button" id="btnScalar" aria-pressed="true">标量（8 B/线程）</button>
+      <button type="button" id="btnVec4" aria-pressed="false">float4（32 B/线程）</button>
+    </span>
+  </div>
+  <div class="readout">
+    <div class="cell"><div class="v" id="rWarps">8</div><div class="k">驻留 warp / SM（上限 64）</div></div>
+    <div class="cell"><div class="v" id="rThreads">27 648</div><div class="k">全机驻留线程（×108 SM）</div></div>
+    <div class="cell"><div class="v" id="rBytes">0.21 MB</div><div class="k">满发时的在途字节</div></div>
+  </div>
+  <div class="meter"><div class="fill" id="mFill"></div><div class="need" id="mNeed" style="left:14.5%"><span>需求 ≈ 1.1 MB</span></div></div>
+  <p class="verdict" id="mVerdict"></p>
+  <p style="font-size:.76rem;color:var(--muted);margin:.3rem 0 0">
+    量级估算：满发在途 = 驻留线程 × 每线程字节；未计发射率与循环断流，所以它解释「够不够」的方向，不是精确预测。实测参考（grid-stride 版）：1/SM → 61.5% / 81.0%，4/SM → 78.8% / 78.8%，32/SM → 81.8% / 83.4%。
+  </p>
+</div>
+
+<div class="callout">
+<b>一句话。</b>带宽是吞吐，延迟要靠「同时在飞」的量去填。这个量 = 驻留线程数 × 每线程发的字节数。
+grid 太小、block 太小、不用向量化、循环断流 —— 四种做法饿死总线的方式不同，账是同一本。
+</div>
+
+<!-- ================================================================ -->
+<h2 id="q2">问题二：in-place 与 out-of-place</h2>
+
+<h3>代码在哪：就是换了一个指针</h3>
+<p>它<b>不是两个 kernel</b>。<code>v1_vec4.cu</code> 里只有一个 relu kernel，
+它只做「读 <code>x[i]</code> → 取 max → 写 <code>out[i]</code>」，根本不知道自己是不是 in-place。
+区别全部发生在 <code>bench.cu</code> 的 <code>sweep_inplace_size()</code> 里，调用时传的指针不同：</p>
+
+<pre>//                输入指针   输出指针
+launch_v1_vec4(buf.dx, buf.dout, n, 0);  // out-of-place：x 和 out 是两块显存
+launch_v1_vec4(buf.dx, buf.dx,   n, 0);  // in-place：    同一块，读它也写它
+//                    ↑ 同一块显存，既是输入又是输出</pre>
+
+<figure>
+<svg viewBox="0 0 720 190" role="img" aria-label="显存布局：out-of-place 是 x 和 out 两块各 64MB，in-place 只有一块 64MB，读写都指向它">
+  <text x="10" y="20" font-size="12.5" fill="currentColor">out-of-place：两块</text>
+  <rect x="10" y="32" width="220" height="40" rx="5" fill="var(--warm)" opacity=".22" stroke="var(--warm)"/>
+  <text x="120" y="56" font-size="11.5" text-anchor="middle" fill="currentColor">x　64 MB（只读）</text>
+  <rect x="262" y="32" width="220" height="40" rx="5" fill="var(--accent)" opacity=".18" stroke="var(--accent)"/>
+  <text x="372" y="56" font-size="11.5" text-anchor="middle" fill="currentColor">out　64 MB（只写）</text>
+  <path d="M 500 76 h 20 v 60 h -480 v -14" fill="none" stroke="currentColor" stroke-width="1"/>
+  <text x="520" y="110" font-size="10.5" fill="var(--muted)">工作集 = 2n</text>
+  <text x="10" y="130" font-size="12.5" fill="currentColor">in-place：一块</text>
+  <rect x="10" y="142" width="220" height="40" rx="5" fill="var(--warm)" opacity=".22" stroke="var(--accent)" stroke-dasharray="5 4"/>
+  <text x="120" y="166" font-size="11.5" text-anchor="middle" fill="currentColor">x = out　64 MB</text>
+  <path d="M 240 162 h 20 v 26 h -250 v -6" fill="none" stroke="currentColor" stroke-width="1"/>
+  <text x="270" y="182" font-size="10.5" fill="var(--muted)">工作集 = n（省一半）</text>
+  <text x="520" y="150" font-size="10.5" fill="var(--muted)">读它、也写它</text>
+  <text x="520" y="20" font-size="10.5" fill="var(--muted)">安全性：每个线程只</text>
+  <text x="520" y="36" font-size="10.5" fill="var(--muted)">读写「自己的」元素，</text>
+  <text x="520" y="52" font-size="10.5" fill="var(--muted)">线程之间不碰对方的</text>
+  <text x="520" y="68" font-size="10.5" fill="var(--muted)">格子 → 不会互相踩</text>
+</svg>
+<figcaption><b>两种调法的全部区别</b>：输出指针指向谁。显存占用 2n → n，其余一切（kernel、线程数、指令）完全相同。</figcaption>
+</figure>
+
+<h3>流量一分没省</h3>
+<p>直觉容易以为 in-place「只写不读」所以快一半 —— 不是。该读的一遍还是要读，
+该写的一遍还是要写，两种调法都是 <b>8 B/元素</b>，总线上的车流一模一样。
+那 in-place 到底省了什么？<b>省的是占地面积</b> —— 而占地面积之所以值钱，是因为 L2。</p>
+
+<h3>显存旁边有个 40 MB 的小仓库</h3>
+<figure>
+<svg viewBox="0 0 720 150" role="img" aria-label="存储层次：SM 最近的是 40MB 的 L2，带宽约 5TB/s；再往下是 40GB 的显存，1.55TB/s">
+  <rect x="8" y="8" width="704" height="34" rx="6" fill="none" stroke="currentColor" stroke-width="1.3"/>
+  <text x="360" y="30" font-size="12.5" text-anchor="middle" fill="currentColor">SM（计算单元）</text>
+  <rect x="120" y="58" width="480" height="34" rx="6" fill="var(--accent)" opacity=".16" stroke="var(--accent)"/>
+  <text x="360" y="80" font-size="11.5" text-anchor="middle" fill="currentColor">L2 缓存 · 40 MB · 实测 ≥ 2.3 TB/s（快，但小）</text>
+  <rect x="30" y="108" width="660" height="34" rx="6" fill="var(--warm)" opacity=".14" stroke="var(--warm)"/>
+  <text x="360" y="130" font-size="11.5" text-anchor="middle" fill="currentColor">显存 DRAM · 40 GB · 1.55 TB/s（大，但慢 3 倍）</text>
+</svg>
+<figcaption><b>层次结构的规则</b>：要用的数据如果在上面那层（L2），就不用去下面（DRAM）。L2 又快又小，所以「工作集能不能整个塞进去」直接决定你走哪条带宽。</figcaption>
+</figure>
+
+<p>现在把两个事实拼起来：in-place 把工作集从 <b>2n</b> 缩到 <b>n</b>，L2 只有 40 MB ——
+于是存在一个分水岭规模，out-of-place 还没挤进去、in-place 已经整个住下了。
+在 n=2²²（数组 16 MB）正好跨线：</p>
+
+<div class="widget">
+  <div class="mono" style="font-size:.78rem;color:var(--muted)">动手选 · 工作集有没有掉进 L2？</div>
+  <div class="row">
+    <span class="seg" role="group" aria-label="规模">
+      <button type="button" data-n="20">n=2²⁰</button>
+      <button type="button" data-n="22" aria-pressed="true">n=2²²</button>
+      <button type="button" data-n="23">n=2²³</button>
+      <button type="button" data-n="24">n=2²⁴</button>
+    </span>
+    <span class="seg" role="group" aria-label="摆放方式">
+      <button type="button" data-p="out" aria-pressed="true">out-of-place</button>
+      <button type="button" data-p="in">in-place</button>
+    </span>
+  </div>
+  <div class="wsbox"><div class="fill" id="wsFill"></div><div class="l2" id="wsL2" style="left:31.25%"><span>L2 = 40 MB</span></div></div>
+  <div class="readout">
+    <div class="cell"><div class="v" id="wSet">32 MB</div><div class="k">工作集（会碰到的地址）</div></div>
+    <div class="cell"><div class="v" id="wL2">挤不进</div><div class="k">相对 40 MB 的 L2</div></div>
+    <div class="cell"><div class="v" id="wBw">1310.7</div><div class="k">实测带宽（GB/s）</div></div>
+  </div>
+  <p class="verdict" id="wVerdict"></p>
+</div>
+
+<h3>实测全表：收益是阶跃的，不是渐变的</h3>
+<div class="chart" role="img" aria-label="各规模下 out-of-place 与 in-place 的实测带宽条形图，竖线为 DRAM 峰值">
+  <div class="row"><span class="lab">n=2¹⁸</span><div class="track"><div class="peakline" style="left:64.8%"></div><div class="bar out" style="width:17.1%"><span class="bval">409.6</span></div><div class="bar in" style="width:14.2%"><span class="bval">341.3</span></div></div></div>
+  <div class="row"><span class="lab">n=2²⁰</span><div class="track"><div class="peakline" style="left:64.8%"></div><div class="bar out" style="width:42.7%"><span class="bval">1024.0</span></div><div class="bar in" style="width:42.7%"><span class="bval">1024.0</span></div></div></div>
+  <div class="row"><span class="lab">n=2²² ★</span><div class="track"><div class="peakline" style="left:64.8%"></div><div class="bar out" style="width:54.6%"><span class="bval">1310.7</span></div><div class="bar in" style="width:97.5%"><span class="bval">2340.6</span></div></div></div>
+  <div class="row"><span class="lab">n=2²³</span><div class="track"><div class="peakline" style="left:64.8%"></div><div class="bar out" style="width:50.6%"><span class="bval">1213.6</span></div><div class="bar in" style="width:52.5%"><span class="bval">1260.3</span></div></div></div>
+  <div class="row"><span class="lab">n=2²⁴</span><div class="track"><div class="peakline" style="left:64.8%"></div><div class="bar out" style="width:54.6%"><span class="bval">1310.7</span></div><div class="bar in" style="width:53.5%"><span class="bval">1285.0</span></div></div></div>
+  <div class="row"><span class="lab">n=2²⁵</span><div class="track"><div class="peakline" style="left:64.8%"></div><div class="bar out" style="width:56.3%"><span class="bval">1351.3</span></div><div class="bar in" style="width:55.4%"><span class="bval">1330.7</span></div></div></div>
+  <div class="legend">
+    <span><i style="background:var(--warm)"></i>out-of-place</span>
+    <span><i style="background:var(--accent)"></i>in-place</span>
+    <span><i style="background:var(--fg);opacity:.4;width:2px"></i>DRAM 峰值 1555.2</span>
+    <span>满格 = 2400 GB/s</span>
+  </div>
+</div>
+<p style="font-size:.85rem;color:var(--muted)">条形越过 DRAM 峰值竖线只有一种解释：那些读写根本没走显存，走的是更快的 L2。</p>
+
+<p>读这张表的三个要点：</p>
+<p><b>① n=2²² 是唯一的分水岭</b>：in-place 工作集 16 MB 舒服地住进 L2，带宽 2340.6 GB/s
+（<b>150.5%</b>，分母是 DRAM 峰值，实际测到的是 L2 带宽），比 out-of-place 快 <b>79%</b>。
+out-of-place 的 32 MB 名义上也「装得进」40 MB，但挤着住、被写回和驱逐搅和，只拿到 84.3%。</p>
+<p><b>② 两边都不沾 L2 时（n≥2²⁴），完全没差别</b>：±2% 就是噪声。流量相同、层次相同，凭什么有差别。</p>
+<p><b>③ n=2²⁰ 两边都只有 65.8%</b>：工作集 8 MB 明明全进 L2，为什么不满？
+因为总量太小 —— 总耗时只有 8 µs，kernel 启动的固定开销（约 5 µs）占了大头。
+小张量上先看启动开销，再看带宽。</p>
+
+<h3>最后一块拼图：为什么 in-place 敢反复跑</h3>
+<p>benchmark 会把同一个调用跑几十遍。in-place 意味着第 2 遍的输入是第 1 遍的输出 ——
+数据被自己改了。ReLU 敢这么干是因为<b>幂等</b>：</p>
+
+<div class="formula">
+relu(relu(x)) = relu(x)<br>
+<small>已经 ≥ 0 的数再过一遍 ReLU 不变 → 跑一百遍，测的都是同一个函数</small>
+</div>
+
+<div class="callout warm">
+<b>换成非幂等算子就是 bug。</b>比如 <code>x = x * 2 + 1</code>：第 2 遍测的是 2x+1 的 2x+1……
+benchmark 从第 2 次迭代起测的根本不是你要测的函数。这类 in-place 基准必须每轮重新上传数据。
+（另外注意编译器层面 in-place 还要求「读写不别名、线程不互踩」—— 本 kernel 每线程只碰自己的元素，安全。）
+</div>
+
+<div class="callout">
+<b>一句话。</b>in-place 省的是占地面积，不是流量。占地减半 → L2 的临界规模翻倍 →
+工作集跨线的那一档，白捡一大截「假带宽」（其实是 L2 带宽）；没跨线的规模，一分钱不省。
+训练代码里它真正的日常收益是：激活显存减半，不容易 OOM。
+</div>
+
+<footer>
+数据出处：<span class="mono">cuda/04_relu/</span>（在途请求 / grid 扫描见 README §3.2，in-place 见 §3.3）；
+对照实验 <span class="mono">cuda/01_vector_add/</span> README §3.1、§3.4。
+实测环境：A100-SXM4-40GB · CUDA 12.4 · sm_80。
+</footer>
+
+</main>
+
+<script>
+(function () {
+  "use strict";
+  var REQ = 1.09e6;          // 1555.2 GB/s × 700 ns ≈ 1.09 MB（需求线）
+  var METER_MAX = 7.5e6;     // 满刻度 7.5 MB（32/SM × float4 的最大值）
+
+  // ---------- 问题一的交互 ----------
+  var slider = document.getElementById("gridSlider");
+  var gridVal = document.getElementById("gridVal");
+  var btnS = document.getElementById("btnScalar");
+  var btnV = document.getElementById("btnVec4");
+  var rW = document.getElementById("rWarps"), rT = document.getElementById("rThreads"),
+      rB = document.getElementById("rBytes"), mF = document.getElementById("mFill"),
+      mV = document.getElementById("mVerdict");
+  var perThread = 8;
+
+  function fmtThreads(t) {
+    return String(t).replace(/\B(?=(\d{3})+(?!\d))/g, " ");
+  }
+  function fmtMB(b) {
+    return (b / 1048576).toFixed(2) + " MB";
+  }
+  function updateMLP() {
+    var perSM = parseInt(slider.value, 10);
+    var warps = Math.min(perSM * 8, 64);
+    var threads = warps * 32 * 108;
+    var bytes = threads * perThread;
+    gridVal.textContent = perSM;
+    rW.textContent = warps;
+    rT.textContent = fmtThreads(threads);
+    rB.textContent = fmtMB(bytes);
+    mF.style.width = Math.min(100, bytes / METER_MAX * 100) + "%";
+    mF.style.background = bytes >= REQ ? "var(--good)" : "var(--accent)";
+    if (bytes >= REQ) {
+      mV.innerHTML = "满发在途 <b class='ok'>" + fmtMB(bytes) + "</b> ≥ 需求 1.1 MB —— 这个配置<b class='ok'>喂得满</b>总线（循环断流仍可能掉点）。";
+    } else {
+      mV.innerHTML = "满发在途只有 <b class='bad'>" + fmtMB(bytes) + "</b>（需求的 " +
+        Math.round(bytes / REQ * 100) + "%）—— 总线<b class='bad'>会饿</b>，带宽上不去。";
+    }
+  }
+  function setMode(v) {
+    perThread = v;
+    btnS.setAttribute("aria-pressed", String(v === 8));
+    btnV.setAttribute("aria-pressed", String(v === 32));
+    updateMLP();
+  }
+  slider.addEventListener("input", updateMLP);
+  btnS.addEventListener("click", function () { setMode(8); });
+  btnV.addEventListener("click", function () { setMode(32); });
+  updateMLP();
+
+  // ---------- 问题二的交互 ----------
+  var L2 = 40, SCALE = 128;  // MB
+  var data = {
+    "20": { arr: 4,  out: 1024.0, "in": 1024.0 },
+    "22": { arr: 16, out: 1310.7, "in": 2340.6 },
+    "23": { arr: 32, out: 1213.6, "in": 1260.3 },
+    "24": { arr: 64, out: 1310.7, "in": 1285.0 }
+  };
+  var curN = "22", curP = "out";
+  var wS = document.getElementById("wSet"), wL = document.getElementById("wL2"),
+      wB = document.getElementById("wBw"), wf = document.getElementById("wsFill"),
+      wV = document.getElementById("wVerdict");
+
+  function updateWS() {
+    var d = data[curN];
+    var ws = curP === "in" ? d.arr : d.arr * 2;
+    var bw = curP === "in" ? d["in"] : d.out;
+    wS.textContent = ws + " MB";
+    wf.style.width = Math.min(100, ws / SCALE * 100) + "%";
+    wf.style.background = ws <= L2 ? "var(--accent)" : "var(--warm)";
+    wB.textContent = bw.toFixed(1);
+    if (d.arr <= 4) {
+      wL.textContent = "装得下";
+      wV.innerHTML = "工作集 <b>" + ws + " MB</b> 虽然住进 L2，但这个规模总量太小 —— 总耗时只有约 8 µs，kernel 启动的固定开销占大头，所以实测只有 " + bw.toFixed(1) + " GB/s。";
+    } else if (ws > L2) {
+      wL.textContent = "装不下";
+      wV.innerHTML = "工作集 <b>" + ws + " MB</b> 远超 L2 → 全走 <b class='bad'>DRAM</b>，两种摆法一个价。in-place 在这个规模省的不是速度，是<b>显存本身</b>。";
+    } else if (ws <= 20) {
+      wL.textContent = "全住进";
+      wV.innerHTML = "in-place 工作集 <b>" + ws + " MB</b> 舒服地住进 L2 → 实测 <b class='ok'>" + bw.toFixed(1) + " GB/s</b>，超过 DRAM 峰值 —— 这不是显存带宽，是 <b class='ok'>L2 带宽</b>。";
+    } else {
+      wL.textContent = curP === "in" ? "勉强住" : "挤着住";
+      if (curP === "in") {
+        wV.innerHTML = "in-place 工作集 <b>" + ws + " MB</b> 勉强住进 L2，但骑在临界点上，收益打折：实测 " + bw.toFixed(1) + " GB/s（81%），只比 out-of-place 快一点。";
+      } else {
+        wV.innerHTML = "out-of-place 工作集 <b>" + ws + " MB</b> 名义上装得进 40 MB，但挤着住、被写回和驱逐搅局 → 只拿到部分 L2 收益，实测 " + bw.toFixed(1) + " GB/s（≈DRAM 速度）。";
+      }
+    }
+  }
+  Array.prototype.forEach.call(document.querySelectorAll("[data-n]"), function (b) {
+    b.addEventListener("click", function () {
+      Array.prototype.forEach.call(document.querySelectorAll("[data-n]"), function (x) {
+        x.setAttribute("aria-pressed", String(x === b));
+      });
+      curN = b.getAttribute("data-n");
+      updateWS();
+    });
+  });
+  Array.prototype.forEach.call(document.querySelectorAll("[data-p]"), function (b) {
+    b.addEventListener("click", function () {
+      Array.prototype.forEach.call(document.querySelectorAll("[data-p]"), function (x) {
+        x.setAttribute("aria-pressed", String(x === b));
+      });
+      curP = b.getAttribute("data-p");
+      updateWS();
+    });
+  });
+  updateWS();
+})();
+</script>
